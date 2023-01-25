@@ -1,0 +1,57 @@
+# Document metadata. metadata.yaml is used by documenteer and other tools
+# to build the document and index it. It should be maintained alongside the
+# document in git and kept up to date.
+
+# The series identifier. E.g. SQR, DMTN, SMTN, LDM, LSE, etc.
+series: "DMTN"
+
+# Document number, as a string. It should be three digits, padded with leading zeros
+serial_number: "249"
+
+# Serial number of the document. E.g. SQR-001
+# NOTE: this field is *planned* for deprecation
+doc_id: "DMTN-249"
+
+# Title of the document, without the series/serial designation
+doc_title: "Revisiting division of responsibilities in Butler components"
+
+# Author names, ordered as a list. Each author name should be formatted as 'First Last'
+authors:
+  - "Jim Bosch"
+
+# Current document revision date, YYYY-MM-DD
+# Only set this field if you need to manually fix the revision date;
+# the revision date is obtained from the HEAD Git commit otherwise.
+# last_revised: 'YYYY-MM-DD'
+
+# Version. Use semantic versioning, e.g., 1.0.0, including .dev, as necessary.
+# This version string should correspond to the git tag when the document is
+# published on Zenodo. If left commented out, the current Git branch is used
+# instead version: '1.0.0'
+
+# Digital Object Identifier (DOI). Uncomment if available.
+# Keep this DOI updated as new releases are pushed to Zenodo
+# doi: 10.5281/zenodo.#####
+
+# Copyright statement
+copyright: "2023, The Trustees of Princeton University"
+
+# Description. A short, 1-2 sentence statemement used by document indices.
+description: "The current boundaries between the Butler and its Registry and Datastore components are under strain in a number of different ways.  Failure recovery during deletion operations has long been in bad shape, and much of the current \"trash\"-based system is currently just unused complexity.  Butler client/server will require new approaches to atomic operations and managing operation latency (including caching), and RFC-901 has recently shown that we may want to move away from the Registry component providing public APIs even outside of the client/server.  The provenance system proposed in DMTN-205 can also impact these boundaries, especially if we want to extend its notion of QuantumGraph storage in data repositories to graphs that have not yet been fully executed; one possibility here is to add a third component that acts as a more graph-oriented Registry.  This technote   will propose a new high-level organization of Butler interfaces and responsibilities to address these concerns."
+
+# Abstract, if available
+# abstract: >
+#           Write your paragraph
+#           here with multiple lines.
+#
+#           You can have multiple paragraphs too.
+
+# URL where this document is published by Read the Docs. e.g. http://sqr-001.lsst.codes
+url: "https://dmtn-249.lsst.io"
+
+# LSST Docushare URL, if authoritative versions of this are are stored there.
+# Leave as an empty string or comment out this key if there is no Docushare URL.
+docushare_url: ""
+
+# GitHub repo URL
+github_url: "https://github.com/lsst-dm/dmtn-249"
