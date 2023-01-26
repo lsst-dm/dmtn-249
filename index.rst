@@ -15,7 +15,7 @@ Abstract
 
 The current boundaries between the Butler and its Registry and Datastore components are under strain in a number of different ways.
 Failure recovery during deletion operations has long been in bad shape, and much of the current "trash"-based system is currently just unused complexity.
-Butler client/server will require new approaches to atomic operations and managing operation latency (including caching), and RFC-901 has recently shown that we may want to move away from the Registry component providing public APIs even outside of the client/server.
+Butler client/server will require new approaches to atomic operations and managing operation latency (including caching), and :jira:`RFC-888` has recently shown that we may want to move away from the Registry component providing public APIs even outside of the client/server.
 The provenance system proposed in :cite:`DMTN-205` can also impact these boundaries, especially if we want to extend its notion of QuantumGraph storage in data repositories to graphs that have not yet been fully executed; one possibility here is to add a third component that acts as a more graph-oriented Registry.
 This technote will propose a new high-level organization of Butler interfaces and responsibilities to address these concerns.
 
@@ -42,7 +42,7 @@ I propose we adopt the following consistency principles instead.
 
 1. A dataset can be present in either Registry or Datastore without being present in the other.
 
-2. A dataset present in Datastore alone must have a data ID that is valid in the Registry for that data repository (i.e. it use valid dimension values) and it must not have any Datastore records in the Registry database.
+2. A dataset present in Datastore alone must have a data ID that is valid in the Registry for that data repository (i.e. it uses valid dimension values) and it must not have any Datastore records in the Registry database.
    This state is expected to be transitory, either intentionally (e.g. during batch execution, before datasets are transferred back), or as a result of failures we cannot rigorously prevent.
    Datasets in this state as a result of failures or abandoned batch runs are considered undesirable but tolerable, and an approach to minimizing them will be introduced later in :ref:`adding_journal_files`.
 
@@ -64,10 +64,10 @@ Some Datastore existence-check methods would go away entirely (e.g. ``knows``), 
 ``Registry.insertDatasets`` would be modified to accept datastore records for storage, and ``Registry.findDataset`` would be modified to return dataset records as well as a ``DatasetRef``.
 
 .. note::
-   All ``DatasetRef`` objects in this technote are assumed to be resolved; unresolved ``DatasetRef`` objects are already slated to go away per :jira:`RFC-901`.
+   All ``DatasetRef`` objects in this technote are assumed to be resolved; unresolved ``DatasetRef`` objects are already slated to go away per :jira:`RFC-888`.
 
 This proposal formalizes what we are already doing during no-database batch execution, while taking advantage of new developments - UUIDs and ``daf_relation`` - to simplify the Registry/Datastore boundary.
-It would involve considerable code changes, but more removals than additions, and the vast majority of thee would be behind the scenes or of minimal impact to users (e.g. ``Butler.datastore`` and ``Registry.insertDatasets`` are not formally private, but they should be, and are already widely recognized as for internal use only).
+It would involve considerable code changes, but more removals than additions, and the vast majority of these would be behind the scenes or of minimal impact to users (e.g. ``Butler.datastore`` and ``Registry.insertDatasets`` are not formally private, but they should be, and are already widely recognized as for internal use only).
 
 Implementation of important butler operations
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -85,7 +85,7 @@ Note that later sections in this technical note will expand upon these and ultim
    This will also typically occur well before the rest of the ``put``, as part of QuantumGraph generation.
 
 2. Perform the ``Datastore.put`` operation, writing the file artifacts associated with the dataset and returning records to the Butler.
-   Datastore can be expected to make this operation atomic, either because it naturally for its storage backing or via writing a temporary and moving it.
+   Datastore can be expected to make this operation atomic, either because it is naturally atomic for its storage backing or via writing a temporary and moving it.
    We do have to accept the possibility of failures leaving partially-written temporary files around.
 
 3. If the butler has a Registry, either held directly (as in a "full butler" today) or as a client of a butler server, call ``Registry.insertDatasets`` with both the ``DatasetRef`` and the records returned by the Datastore.
@@ -119,7 +119,7 @@ These operations have a greater chance than a single ``put`` of leaving us with 
 
 2. Call ``Datastore.get`` with both the resolved ``DatasetRef`` and the bundle of records, returning the result to the caller.
 
-Because this is a write operation consistency in the presence of failures is not a concern, but this still has a major advantage over the current approach for client-server in particular, as it bundles all http server access into a single call, followed by a direct object-store call, reducing latency and again allowing the Datastore to be a regular ``FileDatastore``.
+Because this is a read-only operation, consistency in the presence of failures is not a concern, but this still has a major advantage over the current approach for client-server in particular, as it bundles all http server access into a single call, followed by a direct object-store call, reducing latency and again allowing the Datastore to be a regular ``FileDatastore``.
 
 ``Butler.unstore``
 """"""""""""""""""
