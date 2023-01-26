@@ -219,9 +219,43 @@ Which of these is preferable probably depends on whether we want these operation
    TODO: think about how all of this affects disassembled composites.
    Or get rid of them!  I am pretty confident now that we'll never need them, and dropping that before we embark on other major changes to Datastore seems wise (sorry, Tim).
 
+Public interface changes
+========================
+
+.. note::
+   It's all stubs and outlines from here on.
+
+Bundling DatasetRef with Datastore records
+------------------------------------------
+
+- If we're passing around DatasetRefs and bundles of datastore records together a lot, we should have a class for that.
+- This would logically be what a QuantumGraph stores.
+- This + a datastore would be what backs a DeferredDatasetHandle, if we don't want that hitting a butler server or Registry unnecessarily.
+- This might replace FileLocation.
+
+Butler methods vs. Butler.registry methods
+------------------------------------------
+
+- I've totally come around to the idea of Butler being the only provider of public interfaces, and we should move all useful Registry methods there, at the same time we define a richer set of ABCs for various aspects of Butler interfaces.
+- Registry would become a nonpolymorphic concrete class used by one Butler subclass and the Butler server.
+- A lot of Registry's convenience functionality should move to Butler.
+- I think Registry's caching should move to Butler.
+- Registry's default collections and governor data ID values should definitely move to Butler.
+- Some of the convenience logic in the butler CLI scripts should also move to Butler.
+- We should modernize the query interfaces when we invent their Butler versions and deprecate the Registry ones, to take advantage of new ``daf_relation`` functionality.
+- I still like the idea of having a all Butler objects hold a Datastore, with one Datastore ABC adequate for all different Butlers.
+
+QuantumDirectory
+================
+
+- If journal files point to QuantumGraphs sometimes, those QuantumGraphs should be considered part of the data repository.
+
+- This naturally flows into having pipetask (or a replacement, so we can deprecate a lot of stuff at once instead of piecemeal) use QuantumBackedButler.
+
+
 .. Make in-text citations with: :cite:`bibkey`.
 .. Uncomment to use citations
-.. .. rubric:: References
-..
-.. .. bibliography:: local.bib lsstbib/books.bib lsstbib/lsst.bib lsstbib/lsst-dm.bib lsstbib/refs.bib lsstbib/refs_ads.bib
-..    :style: lsst_aa
+.. rubric:: References
+
+.. bibliography:: local.bib lsstbib/books.bib lsstbib/lsst.bib lsstbib/lsst-dm.bib lsstbib/refs.bib lsstbib/refs_ads.bib
+   :style: lsst_aa
