@@ -84,13 +84,16 @@ Note that later sections in this technical note will expand upon these and ultim
 2. Construct a ``DatasetRef`` by generating an appropriate UUID and using an existing or soon-to-exist RUN name.
    This will also typically occur well before the rest of the ``put``, as part of QuantumGraph generation.
 
-2. Perform the ``Datastore.put`` operation, writing the file artifacts associated with the dataset and returning records to the Butler.
+3. Perform the ``Datastore.put`` operation, writing the file artifacts associated with the dataset and returning records to the Butler.
    Datastore can be expected to make this operation atomic, either because it is naturally atomic for its storage backing or via writing a temporary and moving it.
    We do have to accept the possibility of failures leaving partially-written temporary files around.
+   When the Datastore is backed by storage that requires signed URLs, this write is to a staging area and uses non-signed URIs.
 
-3. If the butler has a Registry, either held directly (as in a "full butler" today) or as a client of a butler server, call ``Registry.insertDatasets`` with both the ``DatasetRef`` and the records returned by the Datastore.
+4. If the butler has a Registry, either held directly (as in a "full butler" today) or as a client of a butler server, call ``Registry.insertDatasets`` with both the ``DatasetRef`` and the records returned by the Datastore.
    Database transactions can be used to ensure that all tables in the Registry (including those for datastore records) are updated consistently or left unchanged.
    If this operation fails, or the butler does not have a Registry (e.g. ``QuantumBackedButler``), the dataset is left in a valid state: it is in the Datastore, but not the Registry.
+   If the Datastore is backed by storage that requires signed URLs, this call also tells the server to transfer the artifacts from the staging area to permanent storage after checking for permissions.
+   This must happen before the database changes are committed.
 
 This has two major advantages over our current ``put`` implementation:
 
@@ -98,6 +101,11 @@ This has two major advantages over our current ``put`` implementation:
 
 - for a client/server butler, there is no alternation between object-store and http operations, just one and then the other, reducing latency (assuming the data ID has indeed been obtained in advance), and increasing the possiblity that the client Datastore can just be a regular ``FileDatastore``.
   Any database transactions needed can also happen entirely in a single server operation.
+
+This change will make it so Datastore sees conflicting writes before Registry.
+While these are expected to be rare, and thus conflict resolution does not need to be highly optimized, is important that it does not have the potential to corrupt the repository.
+The easiest way to do this is to configure Datastore storage backends to prohibit writes to locations where files already exist; this is the default behavior for most backends of interest, but we currently explicitly permit silent clobbering to work around problems with automatic retries in BPS.
+:cite:`DMTN-205` outlines an alternative approach to automatric retries that is better for provenance and should be adopted instead.
 
 ``Butler.import`` and ``Butler.transfer_from``
 """"""""""""""""""""""""""""""""""""""""""""""
@@ -156,8 +164,7 @@ This is not a new flaw - it already a problem that we are very much subject to.
 These orphaned artifacts are a problem for two reasons: they waste space, and they block new Datastore writes to their locations.
 
 .. note::
-   We could have Datastore always clobber whenever it writes, and this may be worth doing anyway as a defensive measure for storage backends that allow it to be efficient.
-   I could imagine it introducing a lot of latency to writes (that would in most cases be unnecessary) for some storage backends, if it involves explicit existence checks before handing off work to the ``Formatter``.
+   Allowing Datastore to clobber whenever it writes is not safe under the new proposal, because Datastore will now see racing conflicting writes before Registry.
 
 To mitigate this, we propose using *journal files* - special files written to configured locations at the start of a Datastore write operation and deleted only when the operation completes successfully.
 These files would contain sufficient information to find all artifacts that might be present in the Datastore without any associated Registry content, allowing us to much more efficiently clean up after any failures.
