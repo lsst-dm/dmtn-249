@@ -1,13 +1,13 @@
 from __future__ import annotations
-from abc import abstractmethod
 
+from abc import abstractmethod
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
+
 from lsst.daf.butler import DatasetRef
 
 
 class Datastore:
-
     @abstractmethod
     def unstore(self, refs: Iterable[DatasetRef]) -> AbstractContextManager[None]:
         """Remove datasets.

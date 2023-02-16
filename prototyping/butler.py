@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import enum
 import uuid
+from collections.abc import Iterable, Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
-from collections.abc import Iterable, Sequence, Mapping, Set, Iterator
-from typing import Any, overload, TextIO
+from typing import Any, TextIO, overload
 
-from lsst.resources import ResourcePath, ResourcePathExpression
 from lsst.daf.butler import (
     CollectionType,
     Config,
     DataCoordinate,
     DataId,
+    DataIdValue,
+    DatasetIdFactory,
     DatasetIdGenEnum,
     DatasetRef,
     DatasetType,
@@ -19,40 +20,38 @@ from lsst.daf.butler import (
     DimensionUniverse,
     FileDataset,
     StorageClass,
-    Timespan,
-    DatasetIdFactory,
     StorageClassFactory,
-    DataIdValue,
+    Timespan,
 )
-from lsst.daf.butler.transfers import RepoExportContext
 from lsst.daf.butler.registry import CollectionTypeError, MissingCollectionError, MissingDatasetTypeError
+from lsst.daf.butler.transfers import RepoExportContext
+from lsst.resources import ResourcePath, ResourcePathExpression
 
-from .limited_butler import LimitedButler
-from .registry import Registry
-from .datastore import Datastore
-from .queries import (
-    Query,
-    CollectionQuery,
-    DatasetTypeQuery,
-    DatasetQueryChain,
-    DataCoordinateQueryAdapter,
-    DimensionRecordQueryAdapter,
-)
 from .aliases import (
-    DimensionName,
-    DimensionElementName,
-    DatasetTypeName,
-    GetParameter,
-    StorageClassName,
+    CollectionDocumentation,
     CollectionName,
     CollectionPattern,
+    DatasetTypeName,
     DatasetTypePattern,
+    DimensionElementName,
+    DimensionName,
+    GetParameter,
     InMemoryDataset,
-    CollectionDocumentation,
+    StorageClassName,
 )
-
+from .batched_edit import BatchedEdit, DimensionDataInsertion, DimensionDataSync
+from .datastore import Datastore
+from .limited_butler import LimitedButler
+from .queries import (
+    CollectionQuery,
+    DataCoordinateQueryAdapter,
+    DatasetQueryChain,
+    DatasetTypeQuery,
+    DimensionRecordQueryAdapter,
+    Query,
+)
+from .registry import Registry
 from .removal_helper import RemovalHelper
-from .batched_edit import DimensionDataInsertion, DimensionDataSync, BatchedEdit
 
 
 class DatasetExistence(enum.Flag):

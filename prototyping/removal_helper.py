@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Iterable
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
 from lsst.daf.butler import DatasetRef
 
 if TYPE_CHECKING:
-    from .butler import Butler
-    from .batched_edit import BatchedEdit
     from .aliases import CollectionName
+    from .batched_edit import BatchedEdit
+    from .butler import Butler
 
 
 @dataclasses.dataclass

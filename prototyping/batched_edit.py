@@ -4,17 +4,18 @@ import dataclasses
 import enum
 import uuid
 from collections.abc import Iterable
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
 from lsst.daf.butler import CollectionType, DatasetRef
 
 if TYPE_CHECKING:
     from .aliases import (
-        DimensionElementName,
-        ColumnName,
         CollectionName,
+        ColumnName,
         DatasetTypeName,
-        OpaqueTableName,
+        DimensionElementName,
         DimensionName,
+        OpaqueTableName,
         StorageClassName,
     )
 

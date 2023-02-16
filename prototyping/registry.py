@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from abc import abstractmethod
 
-from lsst.daf.butler import DimensionUniverse, StorageClassFactory, DatasetIdFactory
+from lsst.daf.butler import DatasetIdFactory, DimensionUniverse, StorageClassFactory
 from lsst.daf.butler.registry import RegistryDefaults
 
-from .queries import Query
 from .batched_edit import BatchedEdit
+from .queries import Query
 
 
 class Registry:

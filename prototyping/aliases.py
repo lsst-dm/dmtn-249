@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Set
-from typing import TypeAlias, Any
-
+from typing import Any, TypeAlias
 
 CollectionName: TypeAlias = str
 DimensionName: TypeAlias = str

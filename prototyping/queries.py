@@ -19,16 +19,17 @@ from lsst.daf.butler import (
     DimensionRecord,
     StorageClass,
 )
+
 from .aliases import (
+    CollectionDocumentation,
+    CollectionName,
+    CollectionPattern,
+    ColumnName,
     DatasetTypeName,
     DatasetTypePattern,
-    DimensionGroup,
-    CollectionName,
-    CollectionDocumentation,
-    CollectionPattern,
-    DimensionName,
     DimensionElementName,
-    ColumnName,
+    DimensionGroup,
+    DimensionName,
 )
 
 
