@@ -13,7 +13,14 @@ if TYPE_CHECKING:
 
 @dataclasses.dataclass
 class RemovalHelper:
-    """A helper class for removing datasets and collections."""
+    """A helper class for removing datasets and collections while tracking
+    their dependencies.
+
+    This class envisions us removing ON DELETE CASCADE from the
+    dataset_tags -> dataset foreign keys as per DM-33635, making it necessary
+    to explicitly delete TAGGED and CALIBRATION collection membership rows
+    before actually deleting datasets.
+    """
 
     butler: Butler
     """Butler being operated upon.
