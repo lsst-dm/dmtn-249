@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import uuid
+from collections import defaultdict
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
@@ -96,11 +97,33 @@ class BatchedDatasetInsertions:
 
 class BatchedDatasetRemovals:
     @property
-    def to_purge(self) -> Iterable[uuid.UUID]:
+    def ids_to_purge(self) -> Iterable[uuid.UUID]:
+        """UUIDs that registry should purge.
+
+        This does not include deleting Datastore records, which needs to come
+        from a Datastore so a ChainedDatastore can tell us which tables to
+        delete from.  Of course, if we don't delete a dataset from all opaque
+        tables, we'll get a foreign key violation when we try to delete from
+        the main dataset table - but that's a useful kind of failure, and its
+        the kind we can fully rollback.
+
+        Note that if there is no ON DELETE CASCADE from tags/calibs tables
+        (there is right now, but DM-33635 says we should change that), we
+        can join to the main dataset table to get the RUN collection ID from
+        the UUID to delete the RUN entries, and only then delete from the
+        main dataset table.
+        """
         raise NotImplementedError()
 
     @property
-    def to_unstore(self) -> Iterable[tuple[OpaqueTableName, Iterable[uuid.UUID]]]:
+    def refs_to_unstore(self) -> Iterable[DatasetRef]:
+        """Fully-expanded DatasetRefs that Datastore should unstore.
+
+        These will have Datastore records for all known Datastores attached
+        (grouped by opaque table name), so a ChainedDatastore can filter this
+        iterable according to its own rules when passing it along to its
+        children.
+        """
         raise NotImplementedError()
 
     def include_refs(self, refs: Iterable[DatasetRef], purge: bool) -> None:
@@ -123,6 +146,12 @@ class BatchedEdit:
     collection_edits: list[
         ChainedCollectionEdit | TaggedCollectionEdit | CalibrationCollectionEdit
     ] = dataclasses.field(default_factory=list)
+    opaque_table_inserts: defaultdict[OpaqueTableName, list[dict[ColumnName, Any]]] = dataclasses.field(
+        default_factory=defaultdict(list)
+    )
+    opaque_table_deletes: dict[OpaqueTableName, list[dict[ColumnName, Any]]] = dataclasses.field(
+        default_factory=defaultdict(list)
+    )
     dataset_removals: BatchedDatasetRemovals = dataclasses.field(default_factory=BatchedDatasetRemovals)
     collection_removals: list[CollectionName] = dataclasses.field(default_factory=list)
     dataset_type_removals: list[DatasetTypeName] = dataclasses.field(default_factory=list)

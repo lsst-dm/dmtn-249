@@ -3,13 +3,17 @@ from __future__ import annotations
 from abc import abstractmethod
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
+from typing import Any
 
 from lsst.daf.butler import DatasetRef
+from .aliases import OpaqueTableName, ColumnName
 
 
 class Datastore:
     @abstractmethod
-    def unstore(self, refs: Iterable[DatasetRef]) -> AbstractContextManager[None]:
+    def unstore(
+        self, refs: Iterable[DatasetRef]
+    ) -> AbstractContextManager[dict[OpaqueTableName, list[dict[ColumnName, Any]]]]:
         """Remove datasets.
 
         Simply calling this method performs no write operations of any kind.
@@ -18,7 +22,8 @@ class Datastore:
         persists the list of datasets (at least UUIDs, generally a URI or other
         storage-specific identifier) to a location that indicates that a
         fallable deletion operation is underway and these datasets may be
-        effective.
+        effective.  It also returns lists of key columns that should be used to
+        delete rows from opaque tables by Registry, before the context exits.
 
         When the context manager exits, actual deletions are executed and the
         journal file (or equivalent) is removed only after all deletions have

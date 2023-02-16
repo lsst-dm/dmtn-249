@@ -275,14 +275,14 @@ class Butler(LimitedButler):
     def unstore(self, refs: Iterable[DatasetRef]) -> None:
         batched_edit = BatchedEdit()
         batched_edit.dataset_removals.include_refs(self.expand_datasets(refs), purge=False)
-        with self._datastore.unstore(batched_edit.dataset_removals.to_unstore):
+        with self._datastore.unstore(batched_edit.dataset_removals.refs_to_unstore) as opaque_rows:
+            for table_name, rows in opaque_rows.items():
+                batched_edit.opaque_table_deletes[table_name].extend(rows)
             self._registry.apply_edit(batched_edit)
 
     def purge(self, refs: Iterable[DatasetRef]) -> None:
-        batched_edit = BatchedEdit()
-        batched_edit.dataset_removals.include_refs(self.expand_datasets(refs), purge=True)
-        with self._datastore.unstore(batched_edit.dataset_removals.to_unstore):
-            self._registry.apply_edit(batched_edit)
+        with self.removal() as removal:
+            removal.include_datasets(refs, find_associations_in=())
 
     @property
     def dimensions(self) -> DimensionUniverse:
@@ -540,7 +540,9 @@ class Butler(LimitedButler):
         yield helper
         if helper:
             batched_edit = helper._into_batched_edit()
-            with self._datastore.unstore(batched_edit.dataset_removals.to_unstore):
+            with self._datastore.unstore(batched_edit.dataset_removals.refs_to_unstore) as opaque_rows:
+                for table_name, rows in opaque_rows.items():
+                    batched_edit.opaque_table_deletes[table_name].extend(rows)
                 self._registry.apply_edit(batched_edit)
 
     ###########################################################################
