@@ -203,6 +203,14 @@ class Query(AbstractContextManager["Query"], Iterable[Mapping[ColumnTag, Any]]):
     ) -> Query:
         ...
 
+    def join_external_uuids(
+        self,
+        dataset_type: DatasetType | DatasetTypeName,
+        uuids: Iterable[uuid.UUID],
+        defer: bool | None = None,
+    ) -> Query:
+        ...
+
     def where(
         self,
         expression: str = "",
