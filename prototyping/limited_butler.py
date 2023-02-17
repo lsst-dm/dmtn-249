@@ -8,7 +8,6 @@ from lsst.daf.butler import DatasetRef, DeferredDatasetHandle, DimensionUniverse
 from lsst.resources import ResourcePath
 
 from .aliases import GetParameter, InMemoryDataset
-from .primitives import DatasetExistence
 
 
 class LimitedButler(ABC):
@@ -38,11 +37,20 @@ class LimitedButler(ABC):
     # - Should we have async variants of get/put/exists?  If so should those be
     #   be vectorized?  How would async relate to get_deferred?
     #
-    # - I've dropped getURIs and kept just getURI (now get_uri) and its
-    #   variants: I envision URIs now being something query_datasets can be
-    #   used to get, and if we do continue to support disassembly I think we
-    #   can relegate the general case of getting multiple URIs for one dataset
-    #   to that.
+    # - The get_uri family needs at least one more argument if we want it to be
+    #   able to predict URIs for datasets that don't exist, and it may need a
+    #   much richer interface if we want it to URIs that are signed, especially
+    #   if they are signed differently for read vs. write vs. delete vs....
+    #
+    # - I've dropped any version of 'exists' for now with the full knowledge we
+    #   need to add something of that sort back.  I haven't been able to come
+    #   up with a LimitedButler signature for that that actually makes sense
+    #   for full Butler, too, since only the latter has a "Registry existence"
+    #   as a meaningful concept.  Something that explicitly only checks for
+    #   Datastore existence only might be all we want in LimitedButler, but
+    #   then we need to make sure the name doesn't imply more than that when
+    #   full Butler implements that interface (since implemntation shoudln't
+    #   change what it means) if we want the new interface to satisfy DM-32940.
     #
     # - I've replaced 'pruneDatasets' with new 'purge' and 'unstore' methods
     #   that I like better.  Full Butler will also have collection-level
@@ -57,11 +65,22 @@ class LimitedButler(ABC):
     ###########################################################################
 
     def put(self, obj: InMemoryDataset, ref: DatasetRef) -> DatasetRef:
-        self.mput([(obj, ref)])
-        return ref
+        """Write a dataset given a DatasetRef with a fully-expanded data ID.
+
+        The returned DatasetRef will be further expanded to include the new
+        Datastore records as well.
+        """
+        (new_ref,) = self.mput([(obj, ref)])
+        return new_ref
 
     @abstractmethod
-    def mput(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> None:
+    def mput(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> Iterable[DatasetRef]:
+        """Write datasets given DatasetRefs with fully-expanded data IDs.
+
+        The returned DatasetRefs will be further expanded to include the new
+        Datastore records as well.  They may not be returned in the same order
+        as the given ones.
+        """
         raise NotImplementedError()
 
     def get(
@@ -70,6 +89,10 @@ class LimitedButler(ABC):
         *,
         parameters: Mapping[GetParameter, Any] | None = None,
     ) -> InMemoryDataset:
+        """Fetch a dataset given a DatasetRef.
+
+        The given ref need not be expanded.
+        """
         ((_, _, result),) = self.mget([(ref, parameters)])
         return result
 
@@ -79,6 +102,10 @@ class LimitedButler(ABC):
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], InMemoryDataset]]:
+        """Fetch datasets given their DatasetRefs.
+
+        The given refs need not be expanded.
+        """
         raise NotImplementedError()
 
     def get_deferred(
@@ -99,41 +126,17 @@ class LimitedButler(ABC):
         raise NotImplementedError()
 
     def get_uri(self, ref: DatasetRef) -> ResourcePath:
-        ((_, uri),) = self.mget_uri([ref])
-        return uri
+        pairs = list(self.mget_uri([ref]))
+        if len(pairs) != 1:
+            raise ValueError(f"Dataset {ref} has no single unique URI; use mget_uri instead.")
+        return pairs[0][1]
 
     @abstractmethod
-    def mget_uri(
-        self,
-        arg: Iterable[DatasetRef],
-        /,
-    ) -> Iterable[tuple[DatasetRef, ResourcePath]]:
-        raise NotImplementedError()
-
-    def exists(self, ref: DatasetRef, exact: bool = True) -> DatasetExistence:
-        (result,) = self.mexists([ref], exact=exact)
-        return result
-
-    @abstractmethod
-    def mexists(
-        self, refs: Iterable[DatasetRef], exact: bool = True
-    ) -> Iterable[DatasetRef, DatasetExistence]:
+    def mget_uri(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
         raise NotImplementedError()
 
     @abstractmethod
     def unstore(self, refs: Iterable[DatasetRef]) -> None:
-        raise NotImplementedError()
-
-    @abstractmethod
-    def purge(self, refs: Iterable[DatasetRef]) -> None:
-        """Fully delete datasets from datastore storage and their
-        RUN collection.
-
-        Should fail if other references to the dataset exist (e.g. TAGGED
-        collection membership, in a full butler).  Full butlers will provide
-        more complete deletion interfaces; this is just the subset that I think
-        both full Butler and QBB need to support.
-        """
         raise NotImplementedError()
 
     @property

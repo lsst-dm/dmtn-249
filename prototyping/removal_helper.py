@@ -8,7 +8,7 @@ from lsst.daf.butler import DatasetRef
 
 if TYPE_CHECKING:
     from .aliases import CollectionName
-    from .batched_edit import BatchedEdit
+    from .raw_batch import RawBatch
     from .butler import Butler
 
 
@@ -106,7 +106,7 @@ class RemovalHelper:
     def __nonzero__(self) -> bool:
         return bool(self.datasets or self.collections or self.chain_links or self.associations)
 
-    def _into_batched_edit(self) -> BatchedEdit:
+    def _into_batched_edit(self) -> RawBatch:
         """Package-private method that converts this helper's content into
         a BatchedEdit object that Registry understands how to operate on.
         """

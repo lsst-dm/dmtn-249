@@ -5,7 +5,7 @@ from abc import abstractmethod
 from lsst.daf.butler import DatasetIdFactory, DimensionUniverse, StorageClassFactory
 from lsst.daf.butler.registry import RegistryDefaults
 
-from .batched_edit import BatchedEdit
+from .raw_batch import RawBatch
 from .queries import Query
 
 
@@ -22,7 +22,7 @@ class Registry:
         raise NotImplementedError()
 
     @abstractmethod
-    def apply_edit(self, edit: BatchedEdit) -> None:
+    def apply_batch(self, batch: RawBatch) -> None:
         raise NotImplementedError()
 
     @abstractmethod

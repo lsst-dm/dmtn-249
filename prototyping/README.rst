@@ -14,7 +14,6 @@ A quick overview of goals and how things are going:
 
 - New classes here are often replacements for classes of the same name in `lsst.daf.butler`.
   In other cases I just import existing classes from `lsst.daf.butler` because I'm not proposing to change them (or change them very little).
-  `DatasetRef` is a partial exception to that: I am planning to give that the capability of storing all related Datastore records when in fully-expanded form.
 
 - There are precious few docstrings here, and there won't ever be many more.
   Instead, I've added a lot of type aliases (in ``aliases.py``) for the various things that are actually represented by `str`, `typing.Any`, or a few other core types, so big nested collections are easy to comprehend.

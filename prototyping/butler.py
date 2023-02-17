@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import enum
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
@@ -14,7 +13,6 @@ from lsst.daf.butler import (
     DataIdValue,
     DatasetIdFactory,
     DatasetIdGenEnum,
-    DatasetRef,
     DatasetType,
     DeferredDatasetHandle,
     DimensionUniverse,
@@ -39,9 +37,16 @@ from .aliases import (
     InMemoryDataset,
     StorageClassName,
 )
-from .batched_edit import BatchedEdit, DimensionDataInsertion, DimensionDataSync
+from .raw_batch import (
+    ChainedCollectionEdit,
+    DimensionDataInsertion,
+    DimensionDataSync,
+    RawBatch,
+    SequenceEditMode,
+)
 from .datastore import Datastore
 from .limited_butler import LimitedButler
+from .primitives import DatasetRef
 from .queries import (
     CollectionQuery,
     DataCoordinateQueryAdapter,
@@ -52,13 +57,6 @@ from .queries import (
 )
 from .registry import Registry
 from .removal_helper import RemovalHelper
-
-
-class DatasetExistence(enum.Flag):
-    UNRECOGNIZED = 0
-    REGISTRY = 1
-    DATASTORE = 2
-    BOTH = 3
 
 
 class Butler(LimitedButler):
@@ -143,12 +141,28 @@ class Butler(LimitedButler):
         ...
 
     def put(self, obj: InMemoryDataset, *args: Any, **kwargs: Any) -> DatasetRef:
-        raise NotImplementedError("Will delegate to Registry to resolve ref and then super().put(obj, ref).")
-
-    def mput(self, args: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> None:
         raise NotImplementedError(
-            "Will delegate to Registry and Datastore; all put() overloads ultimately lead here."
+            """Will delegate to `Registry` to resolve ref and then delegate to
+            ``super().put(obj, ref)``, which will delegate to `mput`.
+            """
         )
+
+    def mput(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> Iterable[DatasetRef]:
+        # Unzip arguments to expand DatasetRefs and then re-zip.
+        objs_by_uuid = {}
+        refs = []
+        for obj, ref in arg:
+            objs_by_uuid[ref.uuid] = obj
+            refs.append(ref)
+        expanded_refs = self.expand_new_dataset_refs(refs)
+        pairs = [(objs_by_uuid[ref.uuid], ref) for ref in expanded_refs]
+        raw_batch = RawBatch()
+        raw_batch.dataset_insertions.include_refs(expanded_refs)
+        with self._datastore.mput_transaction(pairs) as opaque_table_rows:
+            for table_name, rows_for_table in opaque_table_rows:
+                raw_batch.opaque_table_insertions.include(table_name, rows_for_table)
+            self._registry.apply_batch(raw_batch)
+        return raw_batch.opaque_table_insertions.attach_to(refs)
 
     @overload
     def get(
@@ -173,16 +187,24 @@ class Butler(LimitedButler):
         ...
 
     def get(self, *args: Any, **kwargs: Any) -> InMemoryDataset:
-        raise NotImplementedError("Will delegate to Registry to resolve ref and then super().get(ref).")
+        raise NotImplementedError(
+            """Will delegate to `Registry` to resolve ref and then delegate to
+            ``super().get(ref)``, which will delegate to `mget`.
+            """
+        )
 
     def mget(
         self,
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], InMemoryDataset]]:
-        raise NotImplementedError(
-            "Will delegate to Registry and Datastore; all get() overloads ultimately lead here."
-        )
+        parameters = []
+        refs = []
+        for ref, parameters_for_ref in arg:
+            parameters.append(parameters_for_ref)
+            refs.append(ref)
+        refs = list(self.expand_existing_dataset_refs(refs))
+        return self._datastore.mget(zip(refs, parameters))
 
     @overload
     def get_deferred(
@@ -208,7 +230,10 @@ class Butler(LimitedButler):
 
     def get_deferred(self, *args: Any, **kwargs: Any) -> DeferredDatasetHandle:
         raise NotImplementedError(
-            "Will delegate to Registry to resolve ref and then super().get_deferred(ref)."
+            """Will delegate to `Registry` to resolve ref and then delegate to
+            ``super().get_deferred(ref)``, which will delegate to
+            `mget_deferred`.
+            """
         )
 
     def mget_deferred(
@@ -216,9 +241,20 @@ class Butler(LimitedButler):
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], DeferredDatasetHandle]]:
-        raise NotImplementedError(
-            "Will delegate to Registry and Datastore; all get_deferred() overloads ultimately lead here."
-        )
+        parameters = []
+        refs = []
+        for ref, parameters_for_ref in arg:
+            parameters.append(parameters_for_ref)
+            refs.append(ref)
+        refs = list(self.expand_existing_dataset_refs(refs))
+        return [
+            # It's not shown in the prototyping here, but since these are
+            # expanded DatasetRefs that hold all datastore records,
+            # DeferredDatasetHandle only needs to hold a Datastore instead of a
+            # Butler.
+            (ref, parameters_for_ref, DeferredDatasetHandle(self._datastore, ref, parameters))
+            for ref, parameters_for_ref in zip(refs, parameters)
+        ]
 
     @overload
     def get_uri(self, ref: DatasetRef) -> ResourcePath:
@@ -236,53 +272,23 @@ class Butler(LimitedButler):
         ...
 
     def get_uri(self, *args: Any, **kwargs: Any) -> ResourcePath:
-        raise NotImplementedError("Will delegate to Registry to resolve ref and then super().get_uri(ref).")
-
-    def mget_uri(
-        self,
-        arg: Iterable[DatasetRef],
-        /,
-    ) -> Iterable[tuple[DatasetRef, ResourcePath]]:
         raise NotImplementedError(
-            "Will delegate to Registry and Datastore; all get_uri() overloads ultimately lead here."
+            """Will delegate to `Registry` to resolve ref and then delegate to
+            ``super().get_uri(ref)``, which will delegate to
+            `mget_uri`.
+            """
         )
 
-    @overload
-    def exists(self, ref: DatasetRef, exact: bool = True) -> DatasetExistence:
-        ...
-
-    @overload
-    def exists(
-        self,
-        dataset_type: DatasetType | DatasetTypeName,
-        data_id: DataId,
-        collections: CollectionPattern = None,
-        exact: bool = True,
-        **kwargs: DataIdValue,
-    ) -> DatasetExistence:
-        ...
-
-    def exists(self, *args: Any, **kwargs: Any) -> DatasetExistence:
-        raise NotImplementedError("Will delegate to Registry to resolve ref and then super().exists(ref).")
-
-    def mexists(
-        self, refs: Iterable[DatasetRef], exact: bool = True
-    ) -> Iterable[DatasetRef, DatasetExistence]:
-        raise NotImplementedError(
-            "Will delegate to Registry and Datastore; all exists() overloads ultimately lead here."
-        )
+    def mget_uri(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
+        return self._datastore.mget_uri(self.expand_existing_dataset_refs(refs))
 
     def unstore(self, refs: Iterable[DatasetRef]) -> None:
-        batched_edit = BatchedEdit()
-        batched_edit.dataset_removals.include_refs(self.expand_datasets(refs), purge=False)
-        with self._datastore.unstore(batched_edit.dataset_removals.refs_to_unstore) as opaque_rows:
-            for table_name, rows in opaque_rows.items():
-                batched_edit.opaque_table_deletes[table_name].extend(rows)
-            self._registry.apply_edit(batched_edit)
-
-    def purge(self, refs: Iterable[DatasetRef]) -> None:
-        with self.removal() as removal:
-            removal.include_datasets(refs, find_associations_in=())
+        refs = self.expand_existing_dataset_refs(refs)
+        raw_batch = RawBatch()
+        with self._datastore.unstore_transaction(refs) as opaque_table_uuids:
+            for table_name, uuids in opaque_table_uuids:
+                raw_batch.opaque_table_removals.include(table_name, uuids)
+            self._registry.apply_batch(raw_batch)
 
     @property
     def dimensions(self) -> DimensionUniverse:
@@ -388,10 +394,27 @@ class Butler(LimitedButler):
     def get_dataset(self, uuid: uuid.UUID) -> DatasetRef:
         raise NotImplementedError("Will delegate to self.query()")
 
-    def expand_datasets(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
+    def expand_new_dataset_refs(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
+        """Expand data IDs in datasets that are assumed not to exist in the
+        Registry.
+
+        An expanded version of every given ref must be returned.  If one or
+        more dataset refs already exist in the registry, the implementation may
+        fail or ignore the fact that they exist.
+        """
         raise NotImplementedError("Will delegate to self.query()")
 
-    def expand_data_id(self, ref: DataId, dimensions: Iterable[str], **kwargs: Any) -> DataCoordinate:
+    def expand_existing_dataset_refs(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
+        """Expand data IDs in datasets that are assumed to exist in the
+        Registry.
+
+        Datasets that do not actually exist in the Registry need not be
+        returned, but implementations should trust already-expanded content in
+        the given refs to avoid unnecessary queries.
+        """
+        raise NotImplementedError("Will delegate to self.query()")
+
+    def expand_data_id(self, data_id: DataId, dimensions: Iterable[str], **kwargs: Any) -> DataCoordinate:
         raise NotImplementedError("Will delegate to self.query()")
 
     def query_collections(
@@ -481,7 +504,9 @@ class Butler(LimitedButler):
         type: CollectionType = CollectionType.RUN,
         doc: CollectionDocumentation = "",
     ) -> None:
-        raise NotImplementedError("Will delegate to Registry.")
+        raw_batch = RawBatch()
+        raw_batch.collection_registrations.append((name, type, doc))
+        self._registry.apply_batch(raw_batch)
 
     def get_collection_chain(self, chain_name: CollectionName) -> Sequence[CollectionName]:
         for _, collection_type, _, children in self.query().collections(chain_name).details():
@@ -492,15 +517,17 @@ class Butler(LimitedButler):
             return children
         raise MissingCollectionError(f"Collection {chain_name!r} not found.")
 
-    def set_collection_chain(
+    def edit_collection_chain(
         self,
         chain_name: CollectionName,
-        children: CollectionPattern,
+        children: Sequence[CollectionName | int],
+        mode: SequenceEditMode,
         *,
         flatten: bool = False,
-        register: bool = False,
     ) -> None:
-        raise NotImplementedError("Will delegate to Registry.")
+        raw_batch = RawBatch()
+        raw_batch.collection_edits.append(ChainedCollectionEdit(chain_name, list(children), mode, flatten))
+        self._registry.apply_batch(raw_batch)
 
     def get_collection_documentation(self, name: CollectionName) -> CollectionDocumentation:
         for _, _, docs, _ in self.query().collections(name).details():
@@ -508,16 +535,16 @@ class Butler(LimitedButler):
         raise MissingCollectionError(f"Collection {name!r} not found.")
 
     def set_collection_documentation(self, name: CollectionName, doc: CollectionDocumentation) -> None:
-        raise NotImplementedError("Will delegate to Registry.")
+        raise NotImplementedError("Make BatchedEdit and apply it.")
 
     def associate(self, collection: CollectionName, refs: Iterable[DatasetRef]) -> None:
-        raise NotImplementedError("Will delegate to Registry.")
+        raise NotImplementedError("Make BatchedEdit and apply it.")
 
     def disassociate(self, collection: CollectionName, refs: Iterable[DatasetRef]) -> None:
-        raise NotImplementedError("Will delegate to Registry.")
+        raise NotImplementedError("Make BatchedEdit and apply it.")
 
     def certify(self, collection: CollectionName, refs: Iterable[DatasetRef], timespan: Timespan) -> None:
-        raise NotImplementedError("Will delegate to Registry.")
+        raise NotImplementedError("Make BatchedEdit and apply it.")
 
     def decertify(
         self,
@@ -539,11 +566,13 @@ class Butler(LimitedButler):
         helper = RemovalHelper(self)
         yield helper
         if helper:
-            batched_edit = helper._into_batched_edit()
-            with self._datastore.unstore(batched_edit.dataset_removals.refs_to_unstore) as opaque_rows:
+            raw_batch = helper._into_raw_batch()
+            with self._datastore.unstore_transaction(
+                raw_batch.dataset_removals.refs_to_unstore
+            ) as opaque_rows:
                 for table_name, rows in opaque_rows.items():
-                    batched_edit.opaque_table_deletes[table_name].extend(rows)
-                self._registry.apply_edit(batched_edit)
+                    raw_batch.opaque_table_deletes[table_name].extend(rows)
+                self._registry.apply_batch(raw_batch)
 
     ###########################################################################
     #
@@ -599,9 +628,9 @@ class Butler(LimitedButler):
     ###########################################################################
 
     def insert_dimension_data(self, data: Iterable[DimensionDataInsertion | DimensionDataSync]) -> None:
-        batched_edit = BatchedEdit()
-        batched_edit.dimension_data.extend(data)
-        self._registry.apply_edit(batched_edit)
+        raw_batch = RawBatch()
+        raw_batch.dimension_data.extend(data)
+        self._registry.apply_batch(raw_batch)
 
     ###########################################################################
     #
