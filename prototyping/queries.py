@@ -28,9 +28,9 @@ from .aliases import (
     DatasetTypeName,
     DatasetTypePattern,
     DimensionElementName,
-    DimensionGroup,
     DimensionName,
 )
+from .primitives import DimensionGroup
 
 
 class OverlapJoinPolicy(enum.Enum):
