@@ -143,11 +143,11 @@ class Butler(LimitedButler):
     def put(self, obj: InMemoryDataset, *args: Any, **kwargs: Any) -> DatasetRef:
         raise NotImplementedError(
             """Will delegate to `Registry` to resolve ref and then delegate to
-            ``super().put(obj, ref)``, which will delegate to `mput`.
+            ``super().put(obj, ref)``, which will delegate to `put_many`.
             """
         )
 
-    def mput(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> Iterable[DatasetRef]:
+    def put_many(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> Iterable[DatasetRef]:
         # Unzip arguments to expand DatasetRefs and then re-zip.
         objs_by_uuid = {}
         refs = []
@@ -158,7 +158,7 @@ class Butler(LimitedButler):
         pairs = [(objs_by_uuid[ref.uuid], ref) for ref in expanded_refs]
         raw_batch = RawBatch()
         raw_batch.dataset_insertions.include_refs(expanded_refs)
-        with self._datastore.mput_transaction(pairs) as opaque_table_rows:
+        with self._datastore.put_many_transaction(pairs) as opaque_table_rows:
             for table_name, rows_for_table in opaque_table_rows:
                 raw_batch.opaque_table_insertions.include(table_name, rows_for_table)
             self._registry.apply_batch(raw_batch)
@@ -189,11 +189,11 @@ class Butler(LimitedButler):
     def get(self, *args: Any, **kwargs: Any) -> InMemoryDataset:
         raise NotImplementedError(
             """Will delegate to `Registry` to resolve ref and then delegate to
-            ``super().get(ref)``, which will delegate to `mget`.
+            ``super().get(ref)``, which will delegate to `get_many`.
             """
         )
 
-    def mget(
+    def get_many(
         self,
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
         /,
@@ -204,7 +204,7 @@ class Butler(LimitedButler):
             parameters.append(parameters_for_ref)
             refs.append(ref)
         refs = list(self.expand_existing_dataset_refs(refs))
-        return self._datastore.mget(zip(refs, parameters))
+        return self._datastore.get_many(zip(refs, parameters))
 
     @overload
     def get_deferred(
@@ -232,11 +232,11 @@ class Butler(LimitedButler):
         raise NotImplementedError(
             """Will delegate to `Registry` to resolve ref and then delegate to
             ``super().get_deferred(ref)``, which will delegate to
-            `mget_deferred`.
+            `get_many_deferred`.
             """
         )
 
-    def mget_deferred(
+    def get_many_deferred(
         self,
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
         /,
@@ -275,12 +275,12 @@ class Butler(LimitedButler):
         raise NotImplementedError(
             """Will delegate to `Registry` to resolve ref and then delegate to
             ``super().get_uri(ref)``, which will delegate to
-            `mget_uri`.
+            `get_many_uri`.
             """
         )
 
-    def mget_uri(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
-        return self._datastore.mget_uri(self.expand_existing_dataset_refs(refs))
+    def get_many_uris(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
+        return self._datastore.get_many_uri(self.expand_existing_dataset_refs(refs))
 
     def unstore(self, refs: Iterable[DatasetRef]) -> None:
         refs = self.expand_existing_dataset_refs(refs)
@@ -349,10 +349,10 @@ class Butler(LimitedButler):
     #
     # - The `resolve_dataset` method is the new Registry.findDataset, as well
     #   as the entry point for all of the Butler logic that interprets
-    #   non-standard data IDs that Butler.mget will call.  Most of that will be
-    #   delegated to Query, but some of it my need to live here in order to
-    #   have access to the full context in which non-standard data ID keys
-    #   should be interpreted.
+    #   non-standard data IDs that Butler.get_many will call.  Most of that
+    #   will be delegated to Query, but some of it my need to live here in
+    #   order to have access to the full context in which non-standard data ID
+    #   keys should be interpreted.
     #
     # - The new `expand_datasets` method both expands DatasetRef data IDs to
     #   include dimension records and expands the DatasetRefs themselves to

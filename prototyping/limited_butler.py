@@ -25,14 +25,10 @@ class LimitedButler(ABC):
     #   overloads; the "takes a DatasetType [name] and data ID" overloads are
     #   added by the full Butler subclass.
     #
-    # - I've added vectorized m* methods for everything.  I think that's good
-    #   future-proofing for performance, especially when you consider http
+    # - I've added vectorized 'many' methods for everything.  I think that's
+    #   good future-proofing for performance, especially when you consider http
     #   latency + gazillions of tiny (e.g. metric value or cutout-service
     #   postage stamp) datasets.
-    #
-    # - Should we rename the m* methods?  I like mget/mput/mexists, but
-    #   mget_deferred and mget_uri are pretty bad.  Would overloading
-    #   vectorization al a Numpy ufuncs be better?
     #
     # - Should we have async variants of get/put/exists?  If so should those be
     #   be vectorized?  How would async relate to get_deferred?
@@ -70,11 +66,11 @@ class LimitedButler(ABC):
         The returned DatasetRef will be further expanded to include the new
         Datastore records as well.
         """
-        (new_ref,) = self.mput([(obj, ref)])
+        (new_ref,) = self.put_many([(obj, ref)])
         return new_ref
 
     @abstractmethod
-    def mput(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> Iterable[DatasetRef]:
+    def put_many(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> Iterable[DatasetRef]:
         """Write datasets given DatasetRefs with fully-expanded data IDs.
 
         The returned DatasetRefs will be further expanded to include the new
@@ -93,11 +89,11 @@ class LimitedButler(ABC):
 
         The given ref need not be expanded.
         """
-        ((_, _, result),) = self.mget([(ref, parameters)])
+        ((_, _, result),) = self.get_many([(ref, parameters)])
         return result
 
     @abstractmethod
-    def mget(
+    def get_many(
         self,
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
         /,
@@ -114,11 +110,11 @@ class LimitedButler(ABC):
         *,
         parameters: Mapping[GetParameter, Any] | None = None,
     ) -> DeferredDatasetHandle:
-        ((_, _, handle),) = self.mget_deferred([(ref, parameters)])
+        ((_, _, handle),) = self.get_many_deferred([(ref, parameters)])
         return handle
 
     @abstractmethod
-    def mget_deferred(
+    def get_many_deferred(
         self,
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
         /,
@@ -126,13 +122,13 @@ class LimitedButler(ABC):
         raise NotImplementedError()
 
     def get_uri(self, ref: DatasetRef) -> ResourcePath:
-        pairs = list(self.mget_uri([ref]))
+        pairs = list(self.get_many_uris([ref]))
         if len(pairs) != 1:
-            raise ValueError(f"Dataset {ref} has no single unique URI; use mget_uri instead.")
+            raise ValueError(f"Dataset {ref} has no single unique URI; use get_many_uri instead.")
         return pairs[0][1]
 
     @abstractmethod
-    def mget_uri(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
+    def get_many_uris(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
         raise NotImplementedError()
 
     @abstractmethod

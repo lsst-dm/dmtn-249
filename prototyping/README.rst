@@ -28,7 +28,7 @@ A quick overview of goals and how things are going:
 - LimitedButler still exists as an ABC for both the full Butler and QuantumBackedButler.
   Other implementations may exist in the future (that could be useful for Prompt Processing, for example).
 
-- I've added vectorized mget/mput/etc variants to LimitedButler because I think they might be useful (thinking about http latencies) and I wanted to work out the components relationships with that in mind.
+- I've added vectorized get_many/put_many/etc variants to LimitedButler because I think they might be useful (thinking about http latencies) and I wanted to work out the components relationships with that in mind.
 
 - I probably have not thought as much as I should about async here.
   Maybe that could be another ticket on this technote after this one is merged.

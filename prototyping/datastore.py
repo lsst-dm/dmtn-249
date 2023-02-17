@@ -22,7 +22,7 @@ class Datastore(ABC):
     """
 
     @abstractmethod
-    def mget(
+    def get_many(
         self,
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any]]],
         /,
@@ -43,7 +43,7 @@ class Datastore(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def mget_uri(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
+    def get_many_uri(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
         """Return URIs for the given datasets.
 
         Incoming `DatasetRef` objects will have already been fully expanded to
@@ -64,7 +64,7 @@ class Datastore(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def mput(
+    def put_many(
         self,
         arg: Iterable[tuple[InMemoryDataset, DatasetRef]],
         /,
@@ -73,7 +73,7 @@ class Datastore(ABC):
         datastore transaction (such as a QuantumGraph execution) is already
         under way.
 
-        Full `Butler` should use `mput_transaction` instead.
+        Full `Butler` should use `put_many_transaction` instead.
         """
         raise NotImplementedError()
 
@@ -89,7 +89,7 @@ class Datastore(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def mput_transaction(
+    def put_many_transaction(
         self,
         arg: Iterable[tuple[InMemoryDataset, DatasetRef]],
         /,
