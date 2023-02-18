@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence, Set
 from contextlib import ExitStack, contextmanager
-from typing import Any, TextIO, overload
+from typing import Any, overload
 
 from lsst.daf.butler import (
     CollectionType,
@@ -12,8 +12,6 @@ from lsst.daf.butler import (
     DataId,
     DataIdValue,
     DatasetIdFactory,
-    DatasetIdGenEnum,
-    DatasetType,
     DeferredDatasetHandle,
     DimensionRecord,
     DimensionUniverse,
@@ -41,7 +39,7 @@ from .aliases import (
 from .batch_helper import BatchHelper
 from .datastore import Datastore
 from .limited_butler import LimitedButler
-from .primitives import DatasetRef
+from .primitives import DatasetRef, DatasetType, SequenceEditMode, SetEditMode, SetInsertMode
 from .queries import (
     CollectionQuery,
     DataCoordinateQueryAdapter,
@@ -50,7 +48,7 @@ from .queries import (
     DimensionRecordQueryAdapter,
     Query,
 )
-from .raw_batch import RawBatch, SequenceEditMode, SetEditMode
+from .raw_batch import RawBatch
 from .registry import Registry
 from .removal_helper import RemovalHelper
 
@@ -153,10 +151,9 @@ class Butler(LimitedButler):
         expanded_refs = self.expand_new_dataset_refs(refs)
         pairs = [(objs_by_uuid[ref.uuid], ref) for ref in expanded_refs]
         raw_batch = RawBatch()
-        raw_batch.dataset_insertions.include_refs(expanded_refs)
+        raw_batch.dataset_insertions.include(expanded_refs)
         with self._datastore.put_many_transaction(pairs) as opaque_table_rows:
-            for table_name, rows_for_table in opaque_table_rows:
-                raw_batch.opaque_table_insertions.include(table_name, rows_for_table)
+            raw_batch.opaque_table_insertions.include(opaque_table_rows)
             self._registry.apply_batch(raw_batch)
         return raw_batch.opaque_table_insertions.attach_to(refs)
 
@@ -282,8 +279,7 @@ class Butler(LimitedButler):
         refs = self.expand_existing_dataset_refs(refs)
         raw_batch = RawBatch()
         with self._datastore.unstore_transaction(refs) as opaque_table_uuids:
-            for table_name, uuids in opaque_table_uuids:
-                raw_batch.opaque_table_removals.include(table_name, uuids)
+            raw_batch.opaque_table_removals.include(opaque_table_uuids)
             self._registry.apply_batch(raw_batch)
 
     @property
@@ -501,8 +497,8 @@ class Butler(LimitedButler):
     def export(
         self,
         *,
-        directory: str | None = None,
-        filename: str | None = None,
+        directory: ResourcePathExpression | None = None,
+        filename: ResourcePathExpression | None = None,
         format: str | None = None,
         transfer: str | None = None,
     ) -> Iterator[RepoExportContext]:
@@ -511,21 +507,81 @@ class Butler(LimitedButler):
     def import_(
         self,
         *,
-        directory: str | None = None,
-        filename: str | TextIO | None = None,
-        format: str | None = None,
+        directory: ResourcePathExpression | None = None,
+        filename: ResourcePathExpression | None = None,
+        own_absolute: bool = False,
         transfer: str | None = None,
-        skip_dimensions: Set | None = None,
-        id_generation_mode: DatasetIdGenEnum = DatasetIdGenEnum.UNIQUE,
+        dimension_insert_mode: SetInsertMode | None = None,
+        record_validation_info: bool = True,
     ) -> None:
-        raise NotImplementedError("TODO")
+        """Import repository content described by an export file.
+
+        Parameters
+        ----------
+        directory, optional
+            Directory used as the root for all relative URIs in the export
+            file.  If not provided all URIs must be absolute.
+        filename, optional
+            Name of the file that describes the repository context.  If
+            relative, will be assumed to be relative to ``directory``.  If not
+            provided, standard filenames within ``directory`` will be tried.
+        own_absolute, optional
+            If `True`, transfer even absolute URIs outside the Datastore root
+            into the Datastore's location and assume ownership of them.  If
+            `False`, these URIs are ingested as external files with absolute
+            URIs that are known to the Datastore but never deleted by it.
+        transfer, optional
+            Transfer mode recognized by `ResourcePath`.
+        dimension_insert_mode, optional
+            Enum value that controls how to resolve conflicts between dimension
+            data in the export file and dimension data already in the
+            repository.
+        record_validation_info, optional
+            Whether Datastore should record checksums and sizes (etc) for the
+            transferred datasets.
+
+        Notes
+        -----
+        The previous signature took TextIO in filename as well; I think that
+        was just for execution butler creation, and going forward I think
+        that's a job for transfer_from instead of export/import.  If we want
+        take I/O objects in addition URIs maybe we could integrate that into a
+        ResourcePath constructor.
+
+        The previous signature also took a 'format' argument that had to be
+        'yaml', and it also tried the filename with that appended.  Going
+        forward I think we just want to infer the format from the file
+        extent/header, and when no filename is given we try the default
+        filenames for all supported formats in 'directory'.
+        """
+
+        if directory is not None:
+            directory = ResourcePath(directory)
+
+        # TODO: process 'filename' with directory (try abs/relative, different
+        # extensions, etc) until we find something that exists.
+
+        # Iterate over batches and tell Datastore and Registry to handle them.
+        # See RawBatch.read_export_file and RawBatchExport for details.
+        for datastore_config, raw_batch, file_datasets in RawBatch.read_export_file(
+            filename, dimension_insert_mode
+        ):
+            with self._datastore.import_(
+                file_datasets,
+                raw_batch.opaque_table_insertions,
+                transfer=transfer,
+                own_absolute=own_absolute,
+                directory=directory,
+                record_validation_info=record_validation_info,
+                datastore_config=datastore_config,
+            ):
+                self._registry.apply_batch(raw_batch)
 
     def transfer_from(
         self,
         source_butler: LimitedButler,
         source_refs: Iterable[DatasetRef],
         transfer: str = "auto",
-        id_gen_map: Mapping[str, DatasetIdGenEnum] | None = None,
         skip_missing: bool = True,
         register_dataset_types: bool = False,
         transfer_dimensions: bool = False,
@@ -537,7 +593,7 @@ class Butler(LimitedButler):
     # Batch-capable mutators.
     #
     # Everything after the `batched` method here is just a convenience forward
-    # to an identical method on `BatchHelper`.
+    # to an identical method on `BatchHelper`; see thoe for comments and docs.
     #
     ###########################################################################
 

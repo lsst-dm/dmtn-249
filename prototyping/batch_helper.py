@@ -6,6 +6,7 @@ from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING
 
 from lsst.daf.butler import CollectionType, DataId, DimensionRecord, FileDataset, StorageClass, Timespan
+from lsst.resources import ResourcePath, ResourcePathExpression
 
 from .aliases import (
     CollectionDocumentation,
@@ -19,6 +20,7 @@ from .primitives import DatasetRef, DatasetType
 from .raw_batch import (
     ChainedCollectionEdit,
     DatasetTypeRegistration,
+    OpaqueTableInsertionBatch,
     RawBatch,
     SequenceEditMode,
     SetCollectionDocumentation,
@@ -35,6 +37,28 @@ class BatchHelper:
     """Helper object that allows Butler write operations to be batched up
     and executed (usually) within a single transaction with lower (overall)
     latency.
+
+    Much of the Butler write interface is actually implemented here, so that's
+    where I've put the corresponding comments and docs (as opposed to the
+    non-batch forwarding methods on Butler itself.
+
+    Notes
+    -----
+    Method call order here is not respected - instead, operations are applied
+    in a fixed order based on the operation type.  This saves the user from
+    having to know anything about the order needed to satisfy foreign keys, but
+    we will have to add guards to prevent users from e.g. attempting to delete
+    an existing collection and then create a new one with he same name in a
+    batch, as that would actually first attempt to create the new one and then
+    try to delete that later.
+
+    We also need to be wary of users catching exceptions raised by these
+    methods instead of letting them propagate up to the context manager.  We
+    can't stop that from happening, so to be absolute safe we should make sure
+    all of these methods provide strong exception safety on their own (i.e.
+    leave all helper state unchanged if there is an exception in the middle of
+    them).  That is definitely not the case right now for the more complex
+    methods.
     """
 
     def __init__(self, butler: Butler, raw_batch: RawBatch, exit_stack: ExitStack):
@@ -124,8 +148,7 @@ class BatchHelper:
             opaque_table_uuids = self._exit_stack.enter_context(
                 self.butler._datastore.unstore_transaction(helper.datasets)
             )
-            for table_name, uuids in opaque_table_uuids:
-                self._raw_batch.opaque_table_removals.include(table_name, uuids)
+            self._raw_batch.opaque_table_removals.include(opaque_table_uuids)
 
     ###########################################################################
     #
@@ -204,14 +227,23 @@ class BatchHelper:
     def ingest(
         self,
         *datasets: FileDataset,
+        directory: ResourcePathExpression | None = None,
         transfer: str | None = "auto",
+        own_absolute: bool = False,
         record_validation_info: bool = True,
     ) -> None:
-        self._raw_batch.dataset_insertions.include_refs(
-            itertools.chain.from_iterable(d.refs for d in datasets)
+        self._raw_batch.dataset_insertions.include(itertools.chain.from_iterable(d.refs for d in datasets))
+        if directory is not None:
+            directory = ResourcePath(directory)
+        opaque_table_insertions = OpaqueTableInsertionBatch()
+        self._exit_stack.enter_context(
+            self.butler._datastore.import_(
+                datasets,
+                opaque_table_insertions,
+                mode=transfer,
+                own_absolute=own_absolute,
+                directory=directory,
+                record_validation_info=record_validation_info,
+            )
         )
-        opaque_table_rows = self._exit_stack.enter_context(
-            self.butler._datastore.transfer_transaction(datasets, transfer, record_validation_info)
-        )
-        for table_name, rows_for_table in opaque_table_rows:
-            self._raw_batch.opaque_table_insertions.include(table_name, rows_for_table)
+        self._raw_batch.opaque_table_insertions.update(opaque_table_insertions)

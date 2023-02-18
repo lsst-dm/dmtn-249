@@ -15,3 +15,4 @@ InMemoryDataset: TypeAlias = Any
 OpaqueTableName: TypeAlias = str
 OpaqueTableRow: TypeAlias = dict[ColumnName, Any]
 StorageClassName: TypeAlias = str
+FormatterName: TypeAlias = str

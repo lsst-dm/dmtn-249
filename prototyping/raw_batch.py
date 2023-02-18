@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import dataclasses
-import enum
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
-from lsst.daf.butler import CollectionType
+from lsst.daf.butler import CollectionType, DatastoreConfig, FileDataset
+from lsst.resources import ResourcePath
+
+from .primitives import SequenceEditMode, SetEditMode, SetInsertMode
 
 if TYPE_CHECKING:
     from .aliases import (
@@ -16,33 +18,12 @@ if TYPE_CHECKING:
         DatasetTypeName,
         DimensionElementName,
         DimensionName,
+        FormatterName,
         OpaqueTableName,
         OpaqueTableRow,
         StorageClassName,
     )
     from .primitives import DatasetRef, DatasetType
-
-
-class SequenceEditMode(enum.Enum):
-    ASSIGN = enum.auto()
-    REMOVE = enum.auto()
-    EXTEND = enum.auto()
-    PREPEND = enum.auto()
-
-
-class SetInsertMode(enum.Enum):
-    INSERT_OR_FAIL = enum.auto()
-    INSERT_OR_SKIP = enum.auto()
-    INSERT_OR_REPLACE = enum.auto()
-
-
-class SetEditMode(enum.Enum):
-    INSERT_OR_FAIL = SetInsertMode.INSERT_OR_FAIL
-    INSERT_OR_SKIP = SetInsertMode.INSERT_OR_SKIP
-    INSERT_OR_REPLACE = SetInsertMode.INSERT_OR_REPLACE
-    ASSIGN = enum.auto()
-    REMOVE = enum.auto()
-    DISCARD = enum.auto()
 
 
 @dataclasses.dataclass
@@ -111,7 +92,7 @@ class CalibrationCollectionEdit:
 
 
 class DatasetInsertionBatch:
-    def include_refs(self, refs: Iterable[DatasetRef]) -> None:
+    def include(self, refs: Iterable[DatasetRef]) -> None:
         """Include DatasetRefs in the set to be inserted.
 
         Data IDs need not be fully expanded, and any attached datastore records
@@ -135,17 +116,24 @@ class DatasetRemovalBatch:
 
 
 class OpaqueTableInsertionBatch:
-    def include(self, table: OpaqueTableName, rows: Iterable[OpaqueTableRow]) -> None:
+    def include(self, rows_by_table: Iterable[tuple[OpaqueTableName, Iterable[OpaqueTableRow]]]) -> None:
+        raise NotImplementedError()
+
+    def replace(self, rows_by_table: Iterable[tuple[OpaqueTableName, Iterable[OpaqueTableRow]]]) -> None:
+        raise NotImplementedError()
+
+    def update(self, other: OpaqueTableInsertionBatch) -> None:
         raise NotImplementedError()
 
     def attach_to(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
         raise NotImplementedError()
 
-    # Internal state and accessors used by Registry are TBD.
+    # Internal state and accessors used by Registry and
+    # Datastore.transfer_transaction are TBD.
 
 
 class OpaqueTableRemovalBatch:
-    def include(self, table: OpaqueTableName, uuids: Iterable[uuid.UUID]) -> None:
+    def include(self, uuids_by_table: Iterable[tuple[OpaqueTableName, Iterable[uuid.UUID]]]) -> None:
         raise NotImplementedError()
 
     # Internal state and accessors used by Registry are TBD.
@@ -179,6 +167,27 @@ class RawBatch:
     DimensionRecord, etc), since SQLAlchemy ultimately wants builtins, too.
     """
 
+    @classmethod
+    def read_export_file(
+        cls, file: ResourcePath, dimension_insert_mode: SetInsertMode | None = None
+    ) -> Iterator[tuple[DatastoreConfig, RawBatch, list[FileDataset]]]:
+        """Read an export file, yielding batches of inserts and FileDatsets.
+
+        This will support reading our current YAML export files, yielding a
+        single batch and FileDataset combination.
+
+        I'm also envisioning a new export format that's a sequence of
+        serialized `RawBatchExport` instances - a sequence to avoid our current
+        trouble with exports that are too large to fit in memory.
+        """
+        raise NotImplementedError()
+
+    def write_export_file(
+        self, file: ResourcePath, datastore_config: DatastoreConfig, file_datasets: Iterable[FileDataset]
+    ) -> None:
+        """Append this batch to an export file."""
+        raise NotImplementedError()
+
     dataset_type_registrations: dict[DatasetTypeName, DatasetTypeRegistration] = dataclasses.field(
         default_factory=dict
     )
@@ -208,3 +217,42 @@ class RawBatch:
     collection_removals: set[CollectionName] = dataclasses.field(default_factory=set)
 
     dataset_type_removals: set[DatasetTypeName] = dataclasses.field(default_factory=set)
+
+
+@dataclasses.dataclass
+class RawBatchExport:
+    """Serializable form of a RawBatch-based export file chunk.
+
+    This is not intended to be used in in-memory interfaces; it will be used
+    only by `RawBatch`, but it provides useful exposition of the file format
+    (which would be a sequence of these, possibly with compression, with each
+    preceded by byte-offset pointers the end of that item on disk).
+    """
+
+    datastore_config: dict[str, Any] | None
+    """Configuration for the Datastore that wrote
+    ``batch.opaque_table_insertions``.
+
+    If ``batch.opaque_table_insertions`` is empty, this should be `None`.
+    Otherwise, the receiving Datastore can inspect this configuration to see if
+    it can use some or all of those records as-is vs. create new records from
+    the `files` attribute.
+    """
+
+    batch: RawBatch
+    """Registry insertions for the export.
+
+    Any ``opaque_table_insertions`` entries present may or may not be used at
+    the discretion of the receiving Datastore (see
+    `Datastore.transfer_transaction`).
+    """
+
+    files: dict[str, tuple[FormatterName | None, set[uuid.UUID]]]
+    """Files for the Datastore to transfer and insert.
+
+    `str` keys are absolute or relative URIs.
+
+    UUIDs here must correspond to datasets present in
+    `batch.dataset_insertions` (or, if we can make that work, the receiving
+    `Registry`).
+    """
