@@ -13,7 +13,6 @@ if TYPE_CHECKING:
         CollectionDocumentation,
         CollectionName,
         ColumnName,
-        DatasetRef,
         DatasetTypeName,
         DimensionElementName,
         DimensionName,
@@ -21,6 +20,7 @@ if TYPE_CHECKING:
         OpaqueTableRow,
         StorageClassName,
     )
+    from .primitives import DatasetRef, DatasetType
 
 
 class SequenceEditMode(enum.Enum):
@@ -46,6 +46,27 @@ class SetEditMode(enum.Enum):
 
 
 @dataclasses.dataclass
+class DatasetTypeRegistration:
+    name: DatasetTypeName
+    dimensions: set[DimensionName]
+    storage_class_name: StorageClassName
+    is_calibration: bool
+    update: bool
+
+    @classmethod
+    def from_dataset_type(cls, dataset_type: DatasetType, update: bool) -> DatasetTypeRegistration:
+        return cls(
+            dataset_type.name,
+            set(dataset_type.dimensions),
+            dataset_type.storage_class_name,
+            dataset_type.is_calibration,
+        )
+
+    def add_to(self, raw_batch: RawBatch) -> None:
+        raw_batch.dataset_type_registrations[self.name] = self
+
+
+@dataclasses.dataclass
 class DimensionDataInsertion:
     element: DimensionElementName
     records: list[dict[ColumnName, Any]]
@@ -55,10 +76,16 @@ class DimensionDataInsertion:
 @dataclasses.dataclass
 class DimensionDataSync:
     element: DimensionElementName
-    record: list[dict[ColumnName, Any]]
+    records: list[dict[ColumnName, Any]]
     update: bool = False
     on_insert: list[DimensionDataInsertion | DimensionDataSync] = dataclasses.field(default_factory=list)
     on_update: list[DimensionDataInsertion | DimensionDataSync] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class SetCollectionDocumentation:
+    name: CollectionName
+    doc: CollectionDocumentation
 
 
 @dataclasses.dataclass
@@ -79,8 +106,8 @@ class TaggedCollectionEdit:
 @dataclasses.dataclass
 class CalibrationCollectionEdit:
     collection: CollectionName
-    datasets: set[uuid.UUID]
-    mode: SetEditMode
+
+    # TODO
 
 
 class DatasetInsertionBatch:
@@ -152,20 +179,20 @@ class RawBatch:
     DimensionRecord, etc), since SQLAlchemy ultimately wants builtins, too.
     """
 
-    dataset_type_registrations: list[
-        tuple[DatasetTypeName, set[DimensionName], StorageClassName, bool]
-    ] = dataclasses.field(default_factory=list)
+    dataset_type_registrations: dict[DatasetTypeName, DatasetTypeRegistration] = dataclasses.field(
+        default_factory=dict
+    )
 
-    collection_registrations: list[
-        tuple[CollectionName, CollectionType, CollectionDocumentation]
-    ] = dataclasses.field(default_factory=list)
+    collection_registrations: dict[
+        CollectionName, tuple[CollectionType, CollectionDocumentation]
+    ] = dataclasses.field(default_factory=dict)
 
     dimension_data: list[DimensionDataInsertion | DimensionDataSync] = dataclasses.field(default_factory=list)
 
     dataset_insertions: DatasetInsertionBatch = dataclasses.field(default_factory=DatasetInsertionBatch)
 
     collection_edits: list[
-        ChainedCollectionEdit | TaggedCollectionEdit | CalibrationCollectionEdit
+        ChainedCollectionEdit | TaggedCollectionEdit | CalibrationCollectionEdit | SetCollectionDocumentation
     ] = dataclasses.field(default_factory=list)
 
     opaque_table_insertions: OpaqueTableInsertionBatch = dataclasses.field(
@@ -178,6 +205,6 @@ class RawBatch:
 
     dataset_removals: DatasetRemovalBatch = dataclasses.field(default_factory=DatasetRemovalBatch)
 
-    collection_removals: list[CollectionName] = dataclasses.field(default_factory=list)
+    collection_removals: set[CollectionName] = dataclasses.field(default_factory=set)
 
-    dataset_type_removals: list[DatasetTypeName] = dataclasses.field(default_factory=list)
+    dataset_type_removals: set[DatasetTypeName] = dataclasses.field(default_factory=set)

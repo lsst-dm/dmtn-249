@@ -5,8 +5,8 @@ from abc import abstractmethod
 from lsst.daf.butler import DatasetIdFactory, DimensionUniverse, StorageClassFactory
 from lsst.daf.butler.registry import RegistryDefaults
 
-from .raw_batch import RawBatch
 from .queries import Query
+from .raw_batch import RawBatch
 
 
 class Registry:

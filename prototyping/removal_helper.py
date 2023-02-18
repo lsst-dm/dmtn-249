@@ -8,7 +8,6 @@ from lsst.daf.butler import DatasetRef
 
 if TYPE_CHECKING:
     from .aliases import CollectionName
-    from .raw_batch import RawBatch
     from .butler import Butler
 
 
@@ -89,7 +88,7 @@ class RemovalHelper:
         self, find_orphaned: bool = True, recurse: bool = False, find_associations_in: Any = ()
     ) -> None:
         """Include all orphaned collections in the set to be deleted."""
-        just_added = self.include(
+        just_added = self.include_collections(
             self.orphaned, find_orphaned=find_orphaned, find_associations_in=find_associations_in
         )
         self.orphaned.difference_update(just_added.keys())
@@ -105,9 +104,3 @@ class RemovalHelper:
 
     def __nonzero__(self) -> bool:
         return bool(self.datasets or self.collections or self.chain_links or self.associations)
-
-    def _into_batched_edit(self) -> RawBatch:
-        """Package-private method that converts this helper's content into
-        a BatchedEdit object that Registry understands how to operate on.
-        """
-        raise NotImplementedError()

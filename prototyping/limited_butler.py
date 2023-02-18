@@ -4,10 +4,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from lsst.daf.butler import DatasetRef, DeferredDatasetHandle, DimensionUniverse
+from lsst.daf.butler import DeferredDatasetHandle, DimensionUniverse
 from lsst.resources import ResourcePath
 
 from .aliases import GetParameter, InMemoryDataset
+from .primitives import DatasetRef
 
 
 class LimitedButler(ABC):

@@ -136,3 +136,12 @@ class Datastore(ABC):
         deletions have succeeded.
         """
         raise NotImplementedError()
+
+    @abstractmethod
+    def transfer_transaction(
+        self,
+        refs: Iterable[DatasetRef],
+        transfer: str | None = "auto",
+        record_validation_info: bool = True,
+    ) -> AbstractContextManager[Iterable[tuple[OpaqueTableName, Iterable[OpaqueTableRow]]]]:
+        raise NotImplementedError()

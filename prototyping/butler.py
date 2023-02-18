@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence, Set
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import Any, TextIO, overload
 
 from lsst.daf.butler import (
@@ -15,6 +15,7 @@ from lsst.daf.butler import (
     DatasetIdGenEnum,
     DatasetType,
     DeferredDatasetHandle,
+    DimensionRecord,
     DimensionUniverse,
     FileDataset,
     StorageClass,
@@ -37,13 +38,7 @@ from .aliases import (
     InMemoryDataset,
     StorageClassName,
 )
-from .raw_batch import (
-    ChainedCollectionEdit,
-    DimensionDataInsertion,
-    DimensionDataSync,
-    RawBatch,
-    SequenceEditMode,
-)
+from .batch_helper import BatchHelper
 from .datastore import Datastore
 from .limited_butler import LimitedButler
 from .primitives import DatasetRef
@@ -55,6 +50,7 @@ from .queries import (
     DimensionRecordQueryAdapter,
     Query,
 )
+from .raw_batch import RawBatch, SequenceEditMode, SetEditMode
 from .registry import Registry
 from .removal_helper import RemovalHelper
 
@@ -476,38 +472,6 @@ class Butler(LimitedButler):
     ) -> DimensionRecordQueryAdapter:
         raise NotImplementedError("Will delegate to self.query()")
 
-    ###########################################################################
-    #
-    # Collection manipulation, adapted from the current Registry public
-    # interface.
-    #
-    # Open questions / notable changes:
-    #
-    # - registerRun is gone, but RUN is now the default type for
-    #   register_collections.
-    #
-    # - merge_calibrations comes from DM-36590, which appears to be what the
-    #   CPP team really want instead of a decertify CLI.  I still think
-    #   decertify is worth keeping in its current form, but with
-    #   merge_collections it becomes more of a rare-use admin tool instead of
-    #   ever becoming part of the normal calibration management workflow.
-    #
-    # - removal and the RemovalHelper class are an attempt to provide both
-    #   atomic collection deletion and some of the conveniences of the
-    #   remove-collections CLI in Python.
-    #
-    ###########################################################################
-
-    def register_collection(
-        self,
-        name: CollectionName,
-        type: CollectionType = CollectionType.RUN,
-        doc: CollectionDocumentation = "",
-    ) -> None:
-        raw_batch = RawBatch()
-        raw_batch.collection_registrations.append((name, type, doc))
-        self._registry.apply_batch(raw_batch)
-
     def get_collection_chain(self, chain_name: CollectionName) -> Sequence[CollectionName]:
         for _, collection_type, _, children in self.query().collections(chain_name).details():
             if children is None:
@@ -517,136 +481,21 @@ class Butler(LimitedButler):
             return children
         raise MissingCollectionError(f"Collection {chain_name!r} not found.")
 
-    def edit_collection_chain(
-        self,
-        chain_name: CollectionName,
-        children: Sequence[CollectionName | int],
-        mode: SequenceEditMode,
-        *,
-        flatten: bool = False,
-    ) -> None:
-        raw_batch = RawBatch()
-        raw_batch.collection_edits.append(ChainedCollectionEdit(chain_name, list(children), mode, flatten))
-        self._registry.apply_batch(raw_batch)
-
     def get_collection_documentation(self, name: CollectionName) -> CollectionDocumentation:
         for _, _, docs, _ in self.query().collections(name).details():
             return docs
         raise MissingCollectionError(f"Collection {name!r} not found.")
-
-    def set_collection_documentation(self, name: CollectionName, doc: CollectionDocumentation) -> None:
-        raise NotImplementedError("Make BatchedEdit and apply it.")
-
-    def associate(self, collection: CollectionName, refs: Iterable[DatasetRef]) -> None:
-        raise NotImplementedError("Make BatchedEdit and apply it.")
-
-    def disassociate(self, collection: CollectionName, refs: Iterable[DatasetRef]) -> None:
-        raise NotImplementedError("Make BatchedEdit and apply it.")
-
-    def certify(self, collection: CollectionName, refs: Iterable[DatasetRef], timespan: Timespan) -> None:
-        raise NotImplementedError("Make BatchedEdit and apply it.")
-
-    def decertify(
-        self,
-        collection: CollectionName,
-        dataset_type: DatasetTypeName | DatasetType,
-        timespan: Timespan | None = None,
-        *,
-        data_ids: Iterable[DataId] | None = None,
-    ) -> None:
-        raise NotImplementedError("Will delegate to Registry.")
-
-    def merge_calibrations(
-        self, new_collection: CollectionName, existing_collections: Sequence[CollectionName]
-    ) -> None:
-        raise NotImplementedError("will delegate to Registry.")
-
-    @contextmanager
-    def removal(self) -> Iterator[RemovalHelper]:
-        helper = RemovalHelper(self)
-        yield helper
-        if helper:
-            raw_batch = helper._into_raw_batch()
-            with self._datastore.unstore_transaction(
-                raw_batch.dataset_removals.refs_to_unstore
-            ) as opaque_rows:
-                for table_name, rows in opaque_rows.items():
-                    raw_batch.opaque_table_deletes[table_name].extend(rows)
-                self._registry.apply_batch(raw_batch)
-
-    ###########################################################################
-    #
-    # Dataset type manipulation, adapted from the current Registry public
-    # interface.
-    #
-    # Open questions / notable changes:
-    #
-    # - register_dataset_type doesn't need to be passed a full DatasetType
-    #   instance anymore, so it's less verbose to call.
-    #
-    # - register_dataset_type now has an `update` option, which could be used
-    #   to change the storage class.  If there are no datasets that need to be
-    #   updated it could also modify is_calibration and the dimensions.  If
-    #   we retire NameKeyCollectionManager we could also pretty easily add a
-    #   ``rename: str | None = None`` that could do renames when
-    #   ``update=True``.
-    #
-    ###########################################################################
-
-    def register_dataset_type(
-        self,
-        dataset_type_or_name: str | DatasetType,
-        /,
-        dimensions: Iterable[str],
-        storage_class: str | StorageClass,
-        is_calibration: bool = False,
-        update: bool = False,
-    ) -> DatasetType:
-        raise NotImplementedError("Will delegate to Registry.")
 
     def get_dataset_type(self, name: str) -> DatasetType:
         for dataset_type in self.query().dataset_types(name):
             return dataset_type
         raise MissingDatasetTypeError(f"Dataset type {name!r} does not exist.")
 
-    def remove_dataset_type(self, name: str) -> None:
-        raise NotImplementedError("Will delegate to Registry.")
-
-    ###########################################################################
-    #
-    # Dimension data manipulation.
-    #
-    # This wraps the Registry insertDimensionData and syncDimensionData methods
-    # into a pair of helper classes that are passed as an iterable, allowing
-    # heterogeneous insertions and even a bit of conditional logic (see
-    # DimensionDataSync.on_insert and on_update) to be performed atomically
-    # even when that has to happen on a butler server.  I've inspected
-    # RawIngestTask, DefineVisitsTask, BaseSkyMap.register, and
-    # Instrument.register to verify that we could reimplement all of those with
-    # this interface without changing their behavior.
-    #
-    ###########################################################################
-
-    def insert_dimension_data(self, data: Iterable[DimensionDataInsertion | DimensionDataSync]) -> None:
-        raw_batch = RawBatch()
-        raw_batch.dimension_data.extend(data)
-        self._registry.apply_batch(raw_batch)
-
     ###########################################################################
     #
     # Bulk transfers
     #
     ###########################################################################
-
-    def ingest(
-        self,
-        *datasets: FileDataset,
-        transfer: str | None = "auto",
-        run: str | None = None,
-        id_generation_mode: DatasetIdGenEnum = DatasetIdGenEnum.UNIQUE,
-        record_validation_info: bool = True,
-    ) -> None:
-        raise NotImplementedError("TODO")
 
     @contextmanager
     def export(
@@ -682,3 +531,113 @@ class Butler(LimitedButler):
         transfer_dimensions: bool = False,
     ) -> list[DatasetRef]:
         raise NotImplementedError("TODO")
+
+    ###########################################################################
+    #
+    # Batch-capable mutators.
+    #
+    # Everything after the `batched` method here is just a convenience forward
+    # to an identical method on `BatchHelper`.
+    #
+    ###########################################################################
+
+    @contextmanager
+    def batched(self) -> Iterator[BatchHelper]:
+        raw_batch = RawBatch()
+        with ExitStack() as exit_stack:
+            yield BatchHelper(self, raw_batch, exit_stack)
+            self._registry.apply_batch(raw_batch)
+
+    def register_collection(
+        self,
+        name: CollectionName,
+        type: CollectionType = CollectionType.RUN,
+        doc: CollectionDocumentation = "",
+    ) -> None:
+        with self.batched() as batch:
+            batch.register_collection(name, type, doc)
+
+    def edit_collection_chain(
+        self,
+        chain_name: CollectionName,
+        children: Sequence[CollectionName | int],
+        mode: SequenceEditMode,
+        *,
+        flatten: bool = False,
+    ) -> None:
+        with self.batched() as batch:
+            batch.edit_collection_chain(chain_name, children, mode, flatten=flatten)
+
+    def set_collection_documentation(self, name: CollectionName, doc: CollectionDocumentation) -> None:
+        with self.batched() as batch:
+            batch.set_collection_documentation(name, doc)
+
+    def edit_associations(
+        self, collection: CollectionName, refs: Iterable[DatasetRef], mode: SetEditMode
+    ) -> None:
+        with self.batched() as batch:
+            batch.edit_associations(collection, refs, mode)
+
+    def certify(self, collection: CollectionName, refs: Iterable[DatasetRef], timespan: Timespan) -> None:
+        with self.batched() as batch:
+            batch.certify(collection, refs, timespan)
+
+    def decertify(
+        self,
+        collection: CollectionName,
+        dataset_type: DatasetTypeName | DatasetType,
+        timespan: Timespan | None = None,
+        *,
+        data_ids: Iterable[DataId] | None = None,
+    ) -> None:
+        with self.batched() as batch:
+            batch.decertify(collection, dataset_type, timespan, data_ids=data_ids)
+
+    def merge_certifications(self, output: CollectionName, inputs: Sequence[CollectionName]) -> None:
+        with self.batched() as batch:
+            batch.merge_certifications(output, inputs)
+
+    @contextmanager
+    def removal(self) -> Iterator[RemovalHelper]:
+        with self.batched() as batch:
+            yield batch.removal()
+
+    def register_dataset_type(
+        self,
+        dataset_type_or_name: DatasetTypeName | DatasetType,
+        /,
+        dimensions: Iterable[DimensionName] | None = None,
+        storage_class: StorageClassName | StorageClass | None = None,
+        is_calibration: bool | None = None,
+        update: bool = False,
+    ) -> None:
+        with self.batched() as batch:
+            batch.register_dataset_type(
+                dataset_type_or_name, dimensions, storage_class, is_calibration, update=update
+            )
+
+    def remove_dataset_type(self, name: str) -> None:
+        with self.batched() as batch:
+            batch.register_dataset_type(name)
+
+    def insert_dimension_data(
+        self,
+        element: DimensionElementName,
+        data: Iterable[DimensionRecord],
+        mode: SetEditMode = SetEditMode.INSERT_OR_FAIL,
+    ) -> None:
+        with self.batched() as batch:
+            batch.insert_dimension_data(element, data, mode)
+
+    def sync_dimension_data(self, record: DimensionRecord, update: bool = False) -> None:
+        with self.batched() as batch:
+            batch.sync_dimension_data(record, update)
+
+    def ingest(
+        self,
+        *datasets: FileDataset,
+        transfer: str | None = "auto",
+        record_validation_info: bool = True,
+    ) -> None:
+        with self.batched() as batch:
+            batch.ingest(*datasets, transfer, record_validation_info)
