@@ -37,7 +37,7 @@ from .aliases import (
     StorageClassName,
 )
 from .batch_helper import BatchHelper
-from .datastore import Datastore
+from .datastore_butler import DatastoreButler
 from .limited_butler import LimitedButler
 from .primitives import DatasetRef, DatasetType, SequenceEditMode, SetEditMode, SetInsertMode
 from .queries import (
@@ -53,7 +53,7 @@ from .registry import Registry
 from .removal_helper import RemovalHelper
 
 
-class Butler(LimitedButler):
+class Butler(DatastoreButler):
     """A fully-featured concrete Butler that is backed by a (private) Registry
     and Datastore, constructable from just a repository URI.
     """
@@ -63,7 +63,6 @@ class Butler(LimitedButler):
     ###########################################################################
 
     _registry: Registry
-    _datastore: Datastore
 
     ###########################################################################
     # Repository and instance creation methods.
@@ -113,8 +112,13 @@ class Butler(LimitedButler):
         raise NotImplementedError("Implementation should be unchanged, or changed very little.")
 
     ###########################################################################
+    #
     # Implementation of the LimitedButler interface with overloads for dataset
     # type + data ID arguments.
+    #
+    # In addition, all signatures that accept DatasetRef objects no longer
+    # require them to be expanded, as full Butler can expand them as needed.
+    #
     ###########################################################################
 
     @overload
@@ -148,14 +152,17 @@ class Butler(LimitedButler):
         for obj, ref in arg:
             objs_by_uuid[ref.uuid] = obj
             refs.append(ref)
-        expanded_refs = self.expand_new_dataset_refs(refs)
+        expanded_refs = self._expand_new_dataset_refs(refs)
         pairs = [(objs_by_uuid[ref.uuid], ref) for ref in expanded_refs]
         raw_batch = RawBatch()
         raw_batch.dataset_insertions.include(expanded_refs)
         with self._datastore.put_many_transaction(pairs) as opaque_table_rows:
-            raw_batch.opaque_table_insertions.include(opaque_table_rows)
+            raw_batch.opaque_table_insertions.update(opaque_table_rows)
             self._registry.apply_batch(raw_batch)
         return raw_batch.opaque_table_insertions.attach_to(refs)
+
+    def predict_put_many(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
+        return super().predict_put_many(self._expand_new_dataset_refs(refs))
 
     @overload
     def get(
@@ -196,8 +203,8 @@ class Butler(LimitedButler):
         for ref, parameters_for_ref in arg:
             parameters.append(parameters_for_ref)
             refs.append(ref)
-        refs = list(self.expand_existing_dataset_refs(refs))
-        return self._datastore.get_many(zip(refs, parameters))
+        refs = list(self._expand_existing_dataset_refs(refs))
+        return super().get_many(zip(refs, parameters))
 
     @overload
     def get_deferred(
@@ -239,15 +246,8 @@ class Butler(LimitedButler):
         for ref, parameters_for_ref in arg:
             parameters.append(parameters_for_ref)
             refs.append(ref)
-        refs = list(self.expand_existing_dataset_refs(refs))
-        return [
-            # It's not shown in the prototyping here, but since these are
-            # expanded DatasetRefs that hold all datastore records,
-            # DeferredDatasetHandle only needs to hold a Datastore instead of a
-            # Butler.
-            (ref, parameters_for_ref, DeferredDatasetHandle(self._datastore, ref, parameters))
-            for ref, parameters_for_ref in zip(refs, parameters)
-        ]
+        refs = list(self._expand_existing_dataset_refs(refs))
+        return super().get_many_deferred(zip(refs, parameters))
 
     @overload
     def get_uri(self, ref: DatasetRef) -> ResourcePath:
@@ -273,13 +273,13 @@ class Butler(LimitedButler):
         )
 
     def get_many_uris(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
-        return self._datastore.get_many_uri(self.expand_existing_dataset_refs(refs))
+        return super().get_many_uris(self._expand_existing_dataset_refs(refs))
 
     def unstore(self, refs: Iterable[DatasetRef]) -> None:
-        refs = self.expand_existing_dataset_refs(refs)
+        refs = self._expand_existing_dataset_refs(refs)
         raw_batch = RawBatch()
-        with self._datastore.unstore_transaction(refs) as opaque_table_uuids:
-            raw_batch.opaque_table_removals.include(opaque_table_uuids)
+        with self._datastore.unstore_transaction(refs) as opaque_table_keys:
+            raw_batch.opaque_table_removals.update(opaque_table_keys)
             self._registry.apply_batch(raw_batch)
 
     @property
@@ -386,7 +386,7 @@ class Butler(LimitedButler):
     def get_dataset(self, uuid: uuid.UUID) -> DatasetRef:
         raise NotImplementedError("Will delegate to self.query()")
 
-    def expand_new_dataset_refs(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
+    def _expand_new_dataset_refs(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
         """Expand data IDs in datasets that are assumed not to exist in the
         Registry.
 
@@ -396,7 +396,7 @@ class Butler(LimitedButler):
         """
         raise NotImplementedError("Will delegate to self.query()")
 
-    def expand_existing_dataset_refs(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
+    def _expand_existing_dataset_refs(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
         """Expand data IDs in datasets that are assumed to exist in the
         Registry.
 
@@ -566,15 +566,17 @@ class Butler(LimitedButler):
         for datastore_config, raw_batch, file_datasets in RawBatch.read_export_file(
             filename, dimension_insert_mode
         ):
+            if datastore_config is not None:
+                opaque_data = (datastore_config, raw_batch.opaque_table_insertions)
             with self._datastore.import_(
                 file_datasets,
-                raw_batch.opaque_table_insertions,
                 transfer=transfer,
                 own_absolute=own_absolute,
                 directory=directory,
                 record_validation_info=record_validation_info,
-                datastore_config=datastore_config,
-            ):
+                opaque_data=opaque_data,
+            ) as opaque_table_rows:
+                raw_batch.opaque_table_insertions = opaque_table_rows
                 self._registry.apply_batch(raw_batch)
 
     def transfer_from(

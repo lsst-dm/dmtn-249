@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Iterable, Mapping
+from contextlib import AbstractContextManager
 from typing import Any
 
-from lsst.daf.butler import DatastoreConfig, DeferredDatasetHandle, DimensionUniverse, FileDataset
+from lsst.daf.butler import DeferredDatasetHandle, DimensionUniverse, FileDataset
 from lsst.resources import ResourcePath
 
 from .aliases import GetParameter, InMemoryDataset
-from .datastore import Datastore
 from .primitives import DatasetRef
 from .raw_batch import RawBatch
 
@@ -65,7 +64,8 @@ class LimitedButler(ABC):
     ###########################################################################
 
     def put(self, obj: InMemoryDataset, ref: DatasetRef) -> DatasetRef:
-        """Write a dataset given a DatasetRef with a fully-expanded data ID.
+        """Write a dataset given a DatasetRef with a fully-expanded data ID
+        (but no Datastore records).
 
         The returned DatasetRef will be further expanded to include the new
         Datastore records as well.
@@ -75,7 +75,8 @@ class LimitedButler(ABC):
 
     @abstractmethod
     def put_many(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> Iterable[DatasetRef]:
-        """Write datasets given DatasetRefs with fully-expanded data IDs.
+        """Write datasets given DatasetRefs with fully-expanded data IDs (but
+        no Datastore records).
 
         The returned DatasetRefs will be further expanded to include the new
         Datastore records as well.  They may not be returned in the same order
@@ -89,9 +90,8 @@ class LimitedButler(ABC):
         *,
         parameters: Mapping[GetParameter, Any] | None = None,
     ) -> InMemoryDataset:
-        """Fetch a dataset given a DatasetRef.
-
-        The given ref need not be expanded.
+        """Fetch a dataset given a DatasetRef with a fully-expanded data ID,
+        including datastore records.
         """
         ((_, _, result),) = self.get_many([(ref, parameters)])
         return result
@@ -102,9 +102,8 @@ class LimitedButler(ABC):
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], InMemoryDataset]]:
-        """Fetch datasets given their DatasetRefs.
-
-        The given refs need not be expanded.
+        """Fetch datasets given DatasetRefs with fully-expanded data IDs and
+        Datastore records.
         """
         raise NotImplementedError()
 
@@ -154,63 +153,24 @@ class LimitedButler(ABC):
         self,
         directory: ResourcePath | None,
         raw_batch: RawBatch,
-        files: list[FileDataset],
+        file_datasets: list[FileDataset],
         *,
         transfer: str | None = None,
-        include_datastore_records: bool = True,
-    ) -> LimitedExtractor:
+    ) -> LimitedButlerExtractor:
         raise NotImplementedError()
 
     @abstractmethod
-    def _get_datastore_config(self) -> DatastoreConfig | None:
-        raise NotImplementedError()
-
-    @contextmanager
     def export(
         self,
         filename: ResourcePath,
         directory: ResourcePath | None,
         *,
         transfer: str | None = None,
-        include_datastore_records: bool = True,
-    ) -> Iterator[LimitedExtractor]:
-        raw_batch = RawBatch()
-        file_datasets: list[FileDataset] = []
-        yield self._make_extractor(
-            directory, raw_batch, transfer=transfer, include_datastore_records=include_datastore_records
-        )
-        raw_batch.write_export_file(filename, self._get_datastore_config(), file_datasets)
+    ) -> AbstractContextManager[LimitedButlerExtractor]:
+        raise NotImplementedError()
 
 
-class LimitedExtractor:
-    def __init__(
-        self,
-        datastore: Datastore,
-        directory: ResourcePath | None,
-        transfer: str | None,
-        raw_batch: RawBatch,
-        files: list[FileDataset],
-        include_datastore_records: bool,
-    ):
-        self._datastore = datastore
-        self._directory = directory
-        self._transfer = transfer
-        self._include_datastore_records = include_datastore_records
-        self._files = files
-        self._raw_batch = raw_batch
-
+class LimitedButlerExtractor(ABC):
+    @abstractmethod
     def include_datasets(self, refs: Iterable[DatasetRef]) -> None:
-        self._raw_batch.dataset_insertions.include(refs)
-        opaque_table_insertions, file_datasets = self._datastore.export(
-            refs,
-            mode=self._transfer,
-            directory=self._directory,
-            return_records=self._include_datastore_records,
-        )
-        if opaque_table_insertions is not None:
-            self._raw_batch.opaque_table_insertions.update(opaque_table_insertions)
-        # TODO: export dimension records attached to ref data IDs.  But we need
-        # a policy on which SetInsertMode to use for each dimension, and as
-        # well as a different data structure for dimension data in RawBatch
-        # that would permit deduplication.  DM-34834 is also relevant here.
-        self._files.extend(file_datasets)
+        raise NotImplementedError()

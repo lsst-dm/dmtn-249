@@ -19,11 +19,9 @@ if TYPE_CHECKING:
         DimensionElementName,
         DimensionName,
         FormatterName,
-        OpaqueTableName,
-        OpaqueTableRow,
         StorageClassName,
     )
-    from .primitives import DatasetRef, DatasetType
+    from .primitives import DatasetRef, DatasetType, OpaqueTableBatch, OpaqueTableKeyBatch
 
 
 @dataclasses.dataclass
@@ -115,30 +113,6 @@ class DatasetRemovalBatch:
     # Internal state and accessors used by Registry are TBD.
 
 
-class OpaqueTableInsertionBatch:
-    def include(self, rows_by_table: Iterable[tuple[OpaqueTableName, Iterable[OpaqueTableRow]]]) -> None:
-        raise NotImplementedError()
-
-    def replace(self, rows_by_table: Iterable[tuple[OpaqueTableName, Iterable[OpaqueTableRow]]]) -> None:
-        raise NotImplementedError()
-
-    def update(self, other: OpaqueTableInsertionBatch) -> None:
-        raise NotImplementedError()
-
-    def attach_to(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
-        raise NotImplementedError()
-
-    # Internal state and accessors used by Registry and
-    # Datastore.transfer_transaction are TBD.
-
-
-class OpaqueTableRemovalBatch:
-    def include(self, uuids_by_table: Iterable[tuple[OpaqueTableName, Iterable[uuid.UUID]]]) -> None:
-        raise NotImplementedError()
-
-    # Internal state and accessors used by Registry are TBD.
-
-
 @dataclasses.dataclass
 class RawBatch:
     """A batch of butler operations to execute (mostly) within a Registry
@@ -204,13 +178,9 @@ class RawBatch:
         ChainedCollectionEdit | TaggedCollectionEdit | CalibrationCollectionEdit | SetCollectionDocumentation
     ] = dataclasses.field(default_factory=list)
 
-    opaque_table_insertions: OpaqueTableInsertionBatch = dataclasses.field(
-        default_factory=OpaqueTableInsertionBatch
-    )
+    opaque_table_insertions: OpaqueTableBatch = dataclasses.field(default_factory=OpaqueTableBatch)
 
-    opaque_table_removals: OpaqueTableRemovalBatch = dataclasses.field(
-        default_factory=OpaqueTableRemovalBatch
-    )
+    opaque_table_removals: OpaqueTableKeyBatch = dataclasses.field(default_factory=OpaqueTableKeyBatch)
 
     dataset_removals: DatasetRemovalBatch = dataclasses.field(default_factory=DatasetRemovalBatch)
 

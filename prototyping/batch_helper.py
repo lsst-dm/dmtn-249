@@ -20,7 +20,6 @@ from .primitives import DatasetRef, DatasetType
 from .raw_batch import (
     ChainedCollectionEdit,
     DatasetTypeRegistration,
-    OpaqueTableInsertionBatch,
     RawBatch,
     SequenceEditMode,
     SetCollectionDocumentation,
@@ -235,15 +234,13 @@ class BatchHelper:
         self._raw_batch.dataset_insertions.include(itertools.chain.from_iterable(d.refs for d in datasets))
         if directory is not None:
             directory = ResourcePath(directory)
-        opaque_table_insertions = OpaqueTableInsertionBatch()
-        self._exit_stack.enter_context(
+        opaque_table_data = self._exit_stack.enter_context(
             self.butler._datastore.import_(
                 datasets,
-                opaque_table_insertions,
                 mode=transfer,
                 own_absolute=own_absolute,
                 directory=directory,
                 record_validation_info=record_validation_info,
             )
         )
-        self._raw_batch.opaque_table_insertions.update(opaque_table_insertions)
+        self._raw_batch.opaque_table_insertions.update(opaque_table_data)
