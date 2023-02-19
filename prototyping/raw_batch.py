@@ -5,7 +5,14 @@ import uuid
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
-from lsst.daf.butler import CollectionType, DatastoreConfig, FileDataset
+from lsst.daf.butler import (
+    CollectionType,
+    DatastoreConfig,
+    FileDataset,
+    DimensionRecord,
+    DataIdValue,
+    DataCoordinate,
+)
 from lsst.resources import ResourcePath
 
 from .primitives import SequenceEditMode, SetEditMode, SetInsertMode
@@ -46,19 +53,10 @@ class DatasetTypeRegistration:
 
 
 @dataclasses.dataclass
-class DimensionDataInsertion:
-    element: DimensionElementName
-    records: list[dict[ColumnName, Any]]
-    mode: SetInsertMode
-
-
-@dataclasses.dataclass
-class DimensionDataSync:
-    element: DimensionElementName
-    records: list[dict[ColumnName, Any]]
-    update: bool = False
-    on_insert: list[DimensionDataInsertion | DimensionDataSync] = dataclasses.field(default_factory=list)
-    on_update: list[DimensionDataInsertion | DimensionDataSync] = dataclasses.field(default_factory=list)
+class CollectionRegistration:
+    name: CollectionName
+    type: CollectionType
+    doc: CollectionDocumentation
 
 
 @dataclasses.dataclass
@@ -87,6 +85,31 @@ class CalibrationCollectionEdit:
     collection: CollectionName
 
     # TODO
+
+
+@dataclasses.dataclass
+class DimensionDataSync:
+    element: DimensionElementName
+    records: list[dict[ColumnName, Any]]
+    update: bool = False
+    on_insert: list[DimensionDataInsertion] = dataclasses.field(default_factory=list)
+    on_update: list[DimensionDataInsertion] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class DimensionDataInsertion:
+    element: DimensionElementName
+    records: dict[tuple[DataIdValue, ...], dict[ColumnName, Any]] = dataclasses.field(default_factory=dict)
+    mode: SetInsertMode = SetInsertMode.INSERT_OR_SKIP
+
+    def insert_records(self, records: Iterable[DimensionRecord]) -> None:
+        raise NotImplementedError("Convert records to dictionaries and deduplicate.")
+
+    def update_from_data_ids(self, data_ids: Iterable[DataCoordinate]) -> None:
+        raise NotImplementedError("Extract records from expanded data IDs.")
+
+    def update_from_dataset_refs(self, refs: Iterable[DatasetRef]) -> None:
+        raise NotImplementedError("Extract records from DatasetRefs with expanded data IDs.")
 
 
 class DatasetInsertionBatch:
@@ -166,11 +189,15 @@ class RawBatch:
         default_factory=dict
     )
 
-    collection_registrations: dict[
-        CollectionName, tuple[CollectionType, CollectionDocumentation]
-    ] = dataclasses.field(default_factory=dict)
+    collection_registrations: dict[CollectionName, CollectionRegistration] = dataclasses.field(
+        default_factory=dict
+    )
 
-    dimension_data: list[DimensionDataInsertion | DimensionDataSync] = dataclasses.field(default_factory=list)
+    dimension_insertions: dict[DimensionElementName, DimensionDataInsertion] = dataclasses.field(
+        default_factory=dict
+    )
+
+    dimension_syncs: list[DimensionDataSync] = dataclasses.field(default_factory=list)
 
     dataset_insertions: DatasetInsertionBatch = dataclasses.field(default_factory=DatasetInsertionBatch)
 

@@ -163,8 +163,8 @@ class DatastoreButlerExtractor(LimitedButlerExtractor):
         self._file_datasets.extend(file_datasets)
 
         # TODO: export dimension records attached to ref data IDs.  But we need
-        # a policy on which SetInsertMode to use for each dimension, and as
-        # well as a different data structure for dimension data in RawBatch
-        # that would permit deduplication.  DM-34834 is also relevant here.
+        # a policy on which SetInsertMode to use for each dimension (though
+        # INSERT_OR_SKIP is a pretty safe default).  DM-34834 is also relevant
+        # here.
 
         # TODO: export RUN collection registrations for all datasets.

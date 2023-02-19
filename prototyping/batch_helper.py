@@ -197,17 +197,22 @@ class BatchHelper:
         element: DimensionElementName,
         data: Iterable[DimensionRecord],
         mode: SetEditMode = SetEditMode.INSERT_OR_FAIL,
+        on_update_of: DimensionElementName | None = None,
+        on_insert_of: DimensionElementName | None = None,
     ) -> None:
-        raise NotImplementedError("Make a DimensionDataInsert and add it to batch.")
+        raise NotImplementedError(
+            """Make a DimensionDataInsert and add it to batch.
+
+            If on_update_of or on_insert_of is not None, we nest the new
+            DimensionDataInsert under a DimensionDataSync that must already
+            exist.  If both are None, we make check that any existing inserts
+            for this element use the same mode, and fail if they do not.
+            """
+        )
 
     def sync_dimension_data(self, record: DimensionRecord, update: bool = False) -> None:
         raise NotImplementedError(
             """Make a DimensionDataSync and add it to batch.
-
-            But this needs some interface work to make the on_update and
-            on_insert fields work; maybe nested context managers, maybe
-            just exposing those classes or a higher-level non-serializable
-            counterpart.
             """
         )
 
