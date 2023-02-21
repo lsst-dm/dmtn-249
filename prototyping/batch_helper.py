@@ -39,7 +39,7 @@ class BatchHelper:
 
     Much of the Butler write interface is actually implemented here, so that's
     where I've put the corresponding comments and docs (as opposed to the
-    non-batch forwarding methods on Butler itself.
+    non-batch forwarding methods on Butler itself).
 
     Notes
     -----
@@ -49,15 +49,15 @@ class BatchHelper:
     we will have to add guards to prevent users from e.g. attempting to delete
     an existing collection and then create a new one with he same name in a
     batch, as that would actually first attempt to create the new one and then
-    try to delete that later.
+    try to delete that same new collection later.
 
     We also need to be wary of users catching exceptions raised by these
     methods instead of letting them propagate up to the context manager.  We
-    can't stop that from happening, so to be absolute safe we should make sure
-    all of these methods provide strong exception safety on their own (i.e.
-    leave all helper state unchanged if there is an exception in the middle of
-    them).  That is definitely not the case right now for the more complex
-    methods.
+    can't stop that from happening, so to be absolutely safe we should make
+    sure all of these methods provide strong exception safety on their own
+    (i.e.  leave all helper state unchanged if there is an exception in the
+    middle of them).  That is definitely not the case right now for the more
+    complex methods.
     """
 
     def __init__(self, butler: Butler, raw_batch: RawBatch, exit_stack: ExitStack):
@@ -65,34 +65,19 @@ class BatchHelper:
         self._raw_batch = raw_batch
         self._exit_stack = exit_stack
 
-    ###########################################################################
-    #
-    # Collection manipulation, adapted from the current Registry public
-    # interface.
-    #
-    # Open questions / notable changes:
-    #
-    # - registerRun is gone, but RUN is now the default type for
-    #   register_collections.
-    #
-    # - merge_certifications comes from DM-36590, which appears to be what the
-    #   CPP team really want instead of a decertify CLI.  I still think
-    #   decertify is worth keeping in its current form, but with
-    #   merge_certificatoins it becomes more of a rare-use admin tool instead
-    #   of ever becoming part of the normal calibration management workflow.
-    #
-    # - removal and the RemovalHelper class are an attempt to provide both
-    #   atomic collection deletion and some of the conveniences of the
-    #   remove-collections CLI in Python.
-    #
-    ###########################################################################
-
     def register_collection(
         self,
         name: CollectionName,
         type: CollectionType = CollectionType.RUN,
         doc: CollectionDocumentation = "",
     ) -> None:
+        """Like `Registry.registerCollection`, but the default collection type
+        is RUN.
+
+        RUN is more useful default than TAGGED, and with that as the default
+        it's easier to drop the separate current `registerRun` method in favor
+        of just this.
+        """
         self._raw_batch.collection_registrations.append((name, type, doc))
 
     def edit_collection_chain(
@@ -103,20 +88,31 @@ class BatchHelper:
         *,
         flatten: bool = False,
     ) -> None:
+        """A replacement for `Registry.setCollectionChain` that picks up the
+        mode-setting conveniences from the ``butler collection-chain` CLI.
+        """
         self._raw_batch.collection_edits.append(
             ChainedCollectionEdit(chain_name, list(children), mode, flatten)
         )
 
     def set_collection_documentation(self, name: CollectionName, doc: CollectionDocumentation) -> None:
+        """Like the current `Registry.setCollectionDocumentation`."""
         self._raw_batch.collection_edits.append(SetCollectionDocumentation(name, doc))
 
     def edit_associations(
         self, collection: CollectionName, refs: Iterable[DatasetRef], mode: SetEditMode
     ) -> None:
+        """Unified replacement for `Registry.associate` and
+        `Registry.disassociate`.
+
+        This can also handle other edit modes, which mostly amounts to conflict
+        resolution options.
+        """
         uuids = {ref.uuid for ref in refs}
         self._raw_batch.collection_edits.extend(TaggedCollectionEdit(collection, uuids, mode))
 
     def certify(self, collection: CollectionName, refs: Iterable[DatasetRef], timespan: Timespan) -> None:
+        """Like the current `Registry.certify`."""
         raise NotImplementedError("TODO")
 
     def decertify(
@@ -127,13 +123,43 @@ class BatchHelper:
         *,
         data_ids: Iterable[DataId] | None = None,
     ) -> None:
+        """Like the current `Registry.decertify`.
+
+        I'd still like to unify this with `certify` with more convenient
+        `edit_` interface, as CHAINED and TAGGED collections now support, but
+        that requires more work because they different modes here seem like
+        they need to be packaged with different arguments.  I'm putting it off
+        since it doesn't impact the big picture.
+        """
         raise NotImplementedError("TODO")
 
     def merge_certifications(self, output: CollectionName, inputs: Sequence[CollectionName]) -> None:
+        """Flatten multiple CALIBRATION collections into a single one,
+        resolving conflicts in priority order.
+
+        This comes from DM-36590, which appears to be what the CPP team really
+        want instead of a decertify CLI.  I still think at least some of
+        decertify is worth keeping in its current form, but with
+        merge_certificatoins it becomes more of a rare-use admin tool instead
+        of ever becoming part of the normal calibration management workflow.
+        """
         raise NotImplementedError("TODO")
 
     @contextmanager
     def removal(self) -> Iterator[RemovalHelper]:
+        """Remove content from the data repository.
+
+        This method is for fully removing ("purging") datasets and collections.
+        To remove datasets from storage while retaining their metadata, use
+        `unstore` instad.
+
+        Returns
+        -------
+        removal_context
+            Context manager that when enters returns a `RemovalHelper` object
+            that provides methods for identifying the objects to be removed
+            and tracking their dependencies.
+        """
         helper = RemovalHelper(self.butler)
         yield helper
         if helper:
@@ -149,25 +175,6 @@ class BatchHelper:
             )
             self._raw_batch.opaque_table_removals.include(opaque_table_uuids)
 
-    ###########################################################################
-    #
-    # Dataset type manipulation, adapted from the current Registry public
-    # interface.
-    #
-    # Open questions / notable changes:
-    #
-    # - register_dataset_type doesn't need to be passed a full DatasetType
-    #   instance anymore, so it's less verbose to call.
-    #
-    # - register_dataset_type now has an `update` option, which could be used
-    #   to change the storage class.  If there are no datasets that need to be
-    #   updated it could also modify is_calibration and the dimensions.  If
-    #   we retire NameKeyCollectionManager we could also pretty easily add a
-    #   ``rename: str | None = None`` that could do renames when
-    #   ``update=True``.
-    #
-    ###########################################################################
-
     def register_dataset_type(
         self,
         dataset_type_or_name: DatasetTypeName | DatasetType,
@@ -177,6 +184,18 @@ class BatchHelper:
         is_calibration: bool | None = None,
         update: bool = False,
     ) -> None:
+        """Like the current `Registry.registerDatasetType`, but it can also be
+        passed the args needed to construct a `DatasetType` instance instead of
+        a `DatasetType` instance.
+
+        This also includes an ``update`` option for at least storage-class
+        changes.  If there are no datasets that need to be updated it could
+        also modify ``is_calibration`` and the ``dimensions``.
+
+        If we retire `NameKeyCollectionManager` we could also pretty easily add
+        a ``rename: str | None = None`` that could do renames when
+        ``update=True``.
+        """
         if isinstance(dataset_type_or_name, DatasetType):
             registration = DatasetTypeRegistration.from_dataset_type(dataset_type_or_name, update)
         else:
@@ -184,13 +203,24 @@ class BatchHelper:
         registration.add_to(self._raw_batch)
 
     def remove_dataset_type(self, name: str) -> None:
+        """Like the current `Registry.removeDatasetType`.
+
+        This will also still fail if there are any datasets of this type.  We
+        could add something to `RemovalHelper` if we wanted to support
+        automatically deleting datasets when the type is removed.
+        """
         self._raw_batch.dataset_type_removals.add(name)
 
-    ###########################################################################
-    #
-    # Dimension data manipulation.
-    #
-    ###########################################################################
+    def sync_dimension_data(self, record: DimensionRecord, update: bool = False) -> None:
+        """Like the current `Registry.syncDimensionData`, but it can't return
+        anything since the action is deferred.  The use cases that relied on
+        that should be able to use the ``on_insert_of`` and ``on_update_of``
+        args to `insert_dimension_data` instead.
+        """
+        raise NotImplementedError(
+            """Make a DimensionDataSync and add it to batch.
+            """
+        )
 
     def insert_dimension_data(
         self,
@@ -200,6 +230,11 @@ class BatchHelper:
         on_update_of: DimensionElementName | None = None,
         on_insert_of: DimensionElementName | None = None,
     ) -> None:
+        """Like the current `Registry.insertDimensionData`, but it can't return
+        anything since the action is deferred.  The use cases that relied on
+        that should be able to use the ``on_insert`` and ``on_update`` args
+        to `insert_dimension_data` instead.
+        """
         raise NotImplementedError(
             """Make a DimensionDataInsert and add it to batch.
 
@@ -210,24 +245,6 @@ class BatchHelper:
             """
         )
 
-    def sync_dimension_data(self, record: DimensionRecord, update: bool = False) -> None:
-        raise NotImplementedError(
-            """Make a DimensionDataSync and add it to batch.
-            """
-        )
-
-    ###########################################################################
-    #
-    # Bulk transfers
-    #
-    # 'ingest' is different here largely because of RFC-888 - if resolved refs
-    # are required, then the RUN collection and dataset ID generation mode have
-    # to be applied when creating the FileDataset objects, not here.  We'll
-    # to see if that's a burden in the places we call `ingest` downstream and
-    # provide some utility code for making FileDatasets if that's the case.
-    #
-    ###########################################################################
-
     def ingest(
         self,
         *datasets: FileDataset,
@@ -236,6 +253,15 @@ class BatchHelper:
         own_absolute: bool = False,
         record_validation_info: bool = True,
     ) -> None:
+        """Replacement for `Butler.ingest`.
+
+        This signature is different here largely because of RFC-888 - if
+        DatasetRefs are always require, then the RUN collection and dataset ID
+        generation mode have to be applied when creating the FileDataset
+        objects, not here.  We'll to see if that's a burden in the places we
+        call `ingest` downstream, and provide some utility code for making
+        `FileDataset` instances with resolved refs if that's the case.
+        """
         self._raw_batch.dataset_insertions.include(itertools.chain.from_iterable(d.refs for d in datasets))
         if directory is not None:
             directory = ResourcePath(directory)

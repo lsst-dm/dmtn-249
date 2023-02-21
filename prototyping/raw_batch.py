@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING, Any
 
 from lsst.daf.butler import (
     CollectionType,
-    DatastoreConfig,
-    FileDataset,
-    DimensionRecord,
-    DataIdValue,
     DataCoordinate,
+    DataIdValue,
+    DatastoreConfig,
+    DimensionRecord,
+    FileDataset,
 )
 from lsst.resources import ResourcePath
 
@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 
 @dataclasses.dataclass
 class DatasetTypeRegistration:
+    """Serializable representation of a dataset type registration operation."""
+
     name: DatasetTypeName
     dimensions: set[DimensionName]
     storage_class_name: StorageClassName
@@ -54,6 +56,8 @@ class DatasetTypeRegistration:
 
 @dataclasses.dataclass
 class CollectionRegistration:
+    """Serializable representation of a collection registration operation."""
+
     name: CollectionName
     type: CollectionType
     doc: CollectionDocumentation
@@ -61,12 +65,16 @@ class CollectionRegistration:
 
 @dataclasses.dataclass
 class SetCollectionDocumentation:
+    """Serializable representation of a collection documentation assignment."""
+
     name: CollectionName
     doc: CollectionDocumentation
 
 
 @dataclasses.dataclass
 class ChainedCollectionEdit:
+    """Serializable representation of a CHAINED collection modification."""
+
     chain: CollectionName
     children: list[CollectionName | int]
     mode: SequenceEditMode
@@ -75,20 +83,17 @@ class ChainedCollectionEdit:
 
 @dataclasses.dataclass
 class TaggedCollectionEdit:
+    """Serializable representation of a TAGGED collection modification."""
+
     collection: CollectionName
     datasets: set[uuid.UUID]
     mode: SetEditMode
 
 
 @dataclasses.dataclass
-class CalibrationCollectionEdit:
-    collection: CollectionName
-
-    # TODO
-
-
-@dataclasses.dataclass
 class DimensionDataSync:
+    """Serializable representation of a dimension-data sync operation."""
+
     element: DimensionElementName
     records: list[dict[ColumnName, Any]]
     update: bool = False
@@ -98,6 +103,8 @@ class DimensionDataSync:
 
 @dataclasses.dataclass
 class DimensionDataInsertion:
+    """Serializable representation of a dimension-data insertion."""
+
     element: DimensionElementName
     records: dict[tuple[DataIdValue, ...], dict[ColumnName, Any]] = dataclasses.field(default_factory=dict)
     mode: SetInsertMode = SetInsertMode.INSERT_OR_SKIP
@@ -113,6 +120,8 @@ class DimensionDataInsertion:
 
 
 class DatasetInsertionBatch:
+    """Serializable representation of a dataset insertion."""
+
     def include(self, refs: Iterable[DatasetRef]) -> None:
         """Include DatasetRefs in the set to be inserted.
 
@@ -121,10 +130,12 @@ class DatasetInsertionBatch:
         """
         raise NotImplementedError()
 
-    # Internal state and accessors used by Registry are TBD.
+    # Internal state and accessors are TBD.
 
 
 class DatasetRemovalBatch:
+    """Serializable representation of a dataset removal."""
+
     def include(self, refs: Iterable[DatasetRef]) -> None:
         """Include DatasetRefs in the set to be deleted.
 
@@ -133,7 +144,7 @@ class DatasetRemovalBatch:
         """
         raise NotImplementedError()
 
-    # Internal state and accessors used by Registry are TBD.
+    # Internal state and accessors are TBD.
 
 
 @dataclasses.dataclass
@@ -208,7 +219,10 @@ class RawBatch:
     dataset_insertions: DatasetInsertionBatch = dataclasses.field(default_factory=DatasetInsertionBatch)
 
     collection_edits: list[
-        ChainedCollectionEdit | TaggedCollectionEdit | CalibrationCollectionEdit | SetCollectionDocumentation
+        # TODO: include CALIBRATION Collection edits, too.
+        ChainedCollectionEdit
+        | TaggedCollectionEdit
+        | SetCollectionDocumentation
     ] = dataclasses.field(default_factory=list)
 
     opaque_table_insertions: OpaqueTableBatch = dataclasses.field(default_factory=OpaqueTableBatch)

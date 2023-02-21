@@ -8,7 +8,7 @@ from collections.abc import Iterable, Iterator, Mapping, Set
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from lsst.daf.butler import DataCoordinate, StorageClass
+from lsst.daf.butler import DataCoordinate, StorageClass, ddl
 
 if TYPE_CHECKING:
     from .aliases import (
@@ -45,7 +45,7 @@ class SetEditMode(enum.Enum):
 
 
 class DimensionGroup(Set[DimensionName]):
-    """Replacement for DimensionGraph approved on RFC-834.
+    """Placeholder for DimensionGraph replacement approved on RFC-834.
 
     Note that this satisfies `Iterable[str]`, which is how high-level
     interfaces will usually accept it, in order to allow users to also pass
@@ -55,11 +55,10 @@ class DimensionGroup(Set[DimensionName]):
 
 @dataclasses.dataclass
 class DatasetType:
-    """Like the current DatasetType, but:
+    """Placeholder for the current DatasetType, but with:
 
-    - it has a DimensionGroup instead of a DimensionGraph;
-    - snake case (*maybe* worth; these differences aren't as visible as those
-      in DatasetRef).
+    - a DimensionGroup instead of a DimensionGraph;
+    - snake case for consistency with the rest of the prototyping.
     """
 
     name: DatasetTypeName
@@ -74,11 +73,11 @@ class DatasetType:
 
 @dataclasses.dataclass
 class DatasetRef:
-    """Like the current DatasetRef, but:
+    """Like the current DatasetRef, but with
 
-    - it can hold datastore records;
-    - id renamed to uuid (more obviously distinct from data ID);
-    - snake case (probably not a good after the prototype).
+    - datastore records;
+    - ``id`` renamed to ``uuid`` (more obviously distinct from data ID);
+    - snake case for consistency with the rest of the prototyping.
     """
 
     uuid: UUID
@@ -86,36 +85,72 @@ class DatasetRef:
     data_id: DataCoordinate
     run: CollectionName
 
-    # Might want to consider another (outermost) mapping layer here for
-    # something like a secure hash of the datastore config (including roots).
-    # I think just opaque table name is enough to work within a single repo,
-    # since even a chained datastore can delegate to its members to pull out
-    # what they need based on those table names.  But things get hairy when
-    # multiple related Datastores (e.g. some central repo and an exported
-    # subset thereof) get involved in transfers.
-    #
-    # Also worth considering whether this should be package private or public.
-    # It's important that both Registry and Datastore access it, so it can't be
-    # class private.
     datastore_records: Mapping[OpaqueTableName, OpaqueTableValues]
+    """All opaque-table records with the same UUID as this dataset.
+
+    It's worth considering whether this should be package private or public.
+    It's important that both Registry and Datastore access it, so it can't be
+    class-private, but we at least don't want users modifying it, and we may
+    or may not want them looking at it.
+    """
 
 
 class OpaqueTableDefinition(ABC):
+    """Object that represents the definition of an opaque table.
+
+    Datastores construct these to describe what they need; Butler takes them
+    from Datastore and gives them to Registry; Registry holds them and uses
+    them to create and query tables without caring about the details.
+
+    I'm still thinking vaguely about opaque tables being used by things other
+    than Datastore (e.g. if we ever get around to storage-class-specific
+    metadata tables).  But I think I'm willing to lock us into dataset UUIDs
+    always being [part of] the primary key to try to reduce complexity.
+
+    This class's methods interface with an  ``OpaqueTableValues`` alias that's
+    really just `typing.Any` under the hood (see docstring in aliases.py).
+    I'm using `Any` not just to avoid being overly specific here: this is a
+    type erasure pattern, in which each OpaqueTableDefinition implementation
+    probably has its own preferred type for OpaqueTableValues, but nothing else
+    cares what it is.  Using `Any` avoids a lot of casts, and not using `Any`
+    (but casting all over the place) isn't any type-safer.
+    """
+
     @property
     @abstractmethod
     def name(self) -> OpaqueTableName:
         raise NotImplementedError()
 
+    @property
     @abstractmethod
-    def make_rows(self, uuid: UUID, values: OpaqueTableValues) -> Iterable[dict[ColumnName, Any]]:
+    def spec(self) -> ddl.TableSpec:
         raise NotImplementedError()
 
     @abstractmethod
-    def group_rows(self, rows: Iterable[dict[ColumnName, Any]]) -> dict[UUID, OpaqueTableValues]:
+    def values_to_raw(self, uuid: UUID, values: OpaqueTableValues) -> Iterable[dict[ColumnName, Any]]:
+        """Convert from the OpaqueTableValues type used for this opaque table
+        to dictionaries of built-ins that can be passed directly to SQLALchemy.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def raw_to_values(self, rows: Iterable[Mapping[ColumnName, Any]]) -> dict[UUID, OpaqueTableValues]:
+        """Convert from an iterable of SQLAlchemy-friendly mappings to a
+        mapping of OpaqueTableValues keyed by UUID.
+        """
         raise NotImplementedError()
 
 
 class OpaqueTableKeyBatch:
+    """A data structure that holds the UUID keys for rows in several
+    opaque tables.
+
+    This is used to express deletes from one or more opaque tables, since we
+    only need the UUIDs for that.
+
+    This is basically a convenience wrapper around defaultdict(set).
+    """
+
     def __init__(self) -> None:
         self._data: defaultdict[OpaqueTableName, set[UUID]] = defaultdict(set)
 
@@ -137,6 +172,14 @@ class OpaqueTableKeyBatch:
 
 
 class OpaqueTableBatch:
+    """A data structure that holds rows for several opaque tables.
+
+    This is used to express inserts into one or more opaque tables, usually
+    coming from a Datastore.
+
+    This is basically a convenience wrapper around defaultdict(dict).
+    """
+
     def __init__(self) -> None:
         self._data: defaultdict[OpaqueTableName, dict[UUID, OpaqueTableValues]] = defaultdict(dict)
 

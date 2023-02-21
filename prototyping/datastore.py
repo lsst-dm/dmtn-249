@@ -9,7 +9,7 @@ from lsst.daf.butler import DatasetRef, DatastoreConfig, FileDataset
 from lsst.resources import ResourcePath
 
 from .aliases import GetParameter, InMemoryDataset
-from .primitives import OpaqueTableBatch, OpaqueTableKeyBatch, OpaqueTableName, OpaqueTableDefinition
+from .primitives import OpaqueTableBatch, OpaqueTableDefinition, OpaqueTableKeyBatch, OpaqueTableName
 
 
 class Datastore(ABC):

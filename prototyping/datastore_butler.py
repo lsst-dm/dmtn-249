@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from collections.abc import Iterable, Iterator, Mapping, Callable
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
 

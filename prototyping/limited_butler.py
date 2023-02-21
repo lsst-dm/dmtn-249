@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping, Callable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from typing import Any
 
@@ -9,9 +9,9 @@ from lsst.daf.butler import DeferredDatasetHandle, DimensionUniverse, FileDatase
 from lsst.resources import ResourcePath
 
 from .aliases import GetParameter, InMemoryDataset
+from .datastore import DatastoreConfig
 from .primitives import DatasetRef
 from .raw_batch import RawBatch
-from .datastore import DatastoreConfig
 
 
 class LimitedButler(ABC):

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable, Iterator, Mapping, Sequence, Set, Callable
-from contextlib import ExitStack, contextmanager, AbstractContextManager
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from typing import Any, overload
 
 from lsst.daf.butler import (
@@ -36,8 +36,9 @@ from .aliases import (
     StorageClassName,
 )
 from .batch_helper import BatchHelper
-from .datastore_butler import DatastoreButler
+from .butler_extractor import ButlerExtractor
 from .datastore import DatastoreConfig
+from .datastore_butler import DatastoreButler
 from .limited_butler import LimitedButler, LimitedButlerExtractor
 from .primitives import DatasetRef, DatasetType, SequenceEditMode, SetEditMode, SetInsertMode
 from .queries import (
@@ -50,32 +51,53 @@ from .queries import (
 )
 from .raw_batch import RawBatch
 from .registry import Registry
-from .butler_extractor import ButlerExtractor
 from .removal_helper import RemovalHelper
 
 
 class Butler(DatastoreButler):
     """A fully-featured concrete Butler that is backed by a (private) Registry
     and Datastore, constructable from just a repository URI.
+
+    Butler is a concrete class that directly holds a private `Registry`
+    instance and indirectly (via its base class) holds a private `Datastore`
+    instance.  The interface is different from the current Butler's for several
+    different reasons:
+
+    - Some changes first appear in `LimitedButler` (see that class for
+      details), especially those from RFC-888.
+
+    - I've used `typing.overload` to expand out the multiple-argument-type
+      support in get/put/etc, so these look like they've changed more than
+      they actually have.
+
+    - Butler has absorbed much of the Registry public interface, since its
+      registry attribute is going private.
+
+    - Since we cannot support transactions in the same way any more, I've
+      reoriented write operations around the new `BatchHelper` (public) and
+      `RawBatch` classes, which allow many operations to be bundled up (and
+      sent to a butler server, if there is one) to be executed in a single
+      transaction.  The `BatchHelper` interface also uses context managers, but
+      now the methods are on the context object returned, and the context
+      lifetime doesn't affect the parent `Butler` object at all.
+
+    - I've attempted to unify the interfaces and logic of `ingest` and
+      especially `import`, `export`, and `transfer_from`.  In particular,
+      `transfer_from` now uses a context manager (similar to the one `export`
+      currently uses) to control what's transferred.
+
+    - The query interface has been reworked to take advantage of some of the
+      things I think ``daf_relation`` will (finally) let us do, and that
+      includes a new more powerful `query` method (see the `Query` class it
+      returns for more details) as well as forwarders that mostly mimic what
+      the old query system could do before.
+
+    See the directory README for more notes on conventions and caveats.
     """
 
-    ###########################################################################
-    # Instance state
-    ###########################################################################
-
     _registry: Registry
-
-    ###########################################################################
-    # Repository and instance creation methods.
-    #
-    # Open questions / notable changes:
-    #
-    # - Do we actually need all of the myriad arguments to make_repo?  This is
-    #   a good opportunity to remove dead weight.
-    #
-    # - I've replaced a lot of `str` with `ResourcePathExpression` here.
-    #
-    ###########################################################################
+    """Registry that backs this Butler.
+    """
 
     @staticmethod
     def make_repo(
@@ -88,6 +110,15 @@ class Butler(DatastoreButler):
         outfile: ResourcePathExpression | None = None,
         overwrite: bool = False,
     ) -> Config:
+        """Create a new repo.
+
+        This is unchanged from what we have now, aside from more consistent
+        ResourcePathExpression usage and snake_case.
+
+        But do we actually need all of these arguments?  Or are some of them
+        now the "old way" to solve certain problems, and we could consider
+        removing them?
+        """
         raise NotImplementedError("Implementation should be unchanged, or changed very little.")
 
     @staticmethod
@@ -103,13 +134,22 @@ class Butler(DatastoreButler):
         config: Config | ResourcePathExpression | None = None,
         *,
         butler: Butler = None,
-        collections: Any = None,
-        run: str = None,
-        search_paths: list[str] = None,
-        writeable: bool = None,
+        collections: CollectionPattern = None,
+        run: CollectionName = None,
+        search_paths: list[ResourcePathExpression] = None,
+        writeable: bool | None = None,
         infer_defaults: bool = True,
         **kwargs: DataIdValue,
     ):
+        """Create a new repo.
+
+        This is unchanged from what we have now, aside from more consistent
+        ResourcePathExpression usage and snake_case.
+
+        But do we actually need all of these arguments?  Or are some of them
+        now the "old way" to solve certain problems, and we could consider
+        removing them?
+        """
         raise NotImplementedError("Implementation should be unchanged, or changed very little.")
 
     ###########################################################################
@@ -117,13 +157,11 @@ class Butler(DatastoreButler):
     # Implementation of the LimitedButler interface with overloads for dataset
     # type + data ID arguments.
     #
-    # In addition, all signatures that accept DatasetRef objects no longer
-    # require them to be expanded, as full Butler can expand them as needed.
-    #
     ###########################################################################
 
     @overload
     def put(self, obj: InMemoryDataset, ref: DatasetRef) -> DatasetRef:
+        # Signature is inherited, but here it accepts not-expanded refs.
         ...
 
     @overload
@@ -137,6 +175,8 @@ class Butler(DatastoreButler):
         run: CollectionName | None = None,
         **kwargs: DataIdValue,
     ) -> DatasetRef:
+        # This overload is not inherited from LimitedButler, but it's unchanged
+        # from what we have now except for snake_case.
         ...
 
     def put(self, obj: InMemoryDataset, *args: Any, **kwargs: Any) -> DatasetRef:
@@ -147,6 +187,7 @@ class Butler(DatastoreButler):
         )
 
     def put_many(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> Iterable[DatasetRef]:
+        # Signature is inherited, but here it accepts not-expanded refs.
         # Unzip arguments to expand DatasetRefs and then re-zip.
         objs_by_uuid = {}
         refs = []
@@ -157,12 +198,15 @@ class Butler(DatastoreButler):
         pairs = [(objs_by_uuid[ref.uuid], ref) for ref in expanded_refs]
         raw_batch = RawBatch()
         raw_batch.dataset_insertions.include(expanded_refs)
+        # We can't delegate to super because we need to use the transactional
+        # version of the Datastore API to ensure consistency via journal files.
         with self._datastore.put_many_transaction(pairs) as opaque_table_rows:
             raw_batch.opaque_table_insertions.update(opaque_table_rows)
             self._registry.apply_batch(raw_batch)
         return raw_batch.opaque_table_insertions.attach_to(refs)
 
     def predict_put_many(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
+        # Signature is inherited, but here it accepts not-expanded refs.
         return super().predict_put_many(self._expand_new_dataset_refs(refs))
 
     @overload
@@ -172,6 +216,7 @@ class Butler(DatastoreButler):
         *,
         parameters: Mapping[GetParameter, Any] | None = None,
     ) -> InMemoryDataset:
+        # Signature is inherited, but here it accepts not-expanded refs.
         ...
 
     @overload
@@ -185,6 +230,8 @@ class Butler(DatastoreButler):
         collections: CollectionPattern = None,
         **kwargs: DataIdValue,
     ) -> InMemoryDataset:
+        # This overload is not inherited from LimitedButler, but it's unchanged
+        # from what we have now except for snake_case.
         ...
 
     def get(self, *args: Any, **kwargs: Any) -> InMemoryDataset:
@@ -199,6 +246,7 @@ class Butler(DatastoreButler):
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], InMemoryDataset]]:
+        # Signature is inherited, but here it accepts not-expanded refs.
         parameters = []
         refs = []
         for ref, parameters_for_ref in arg:
@@ -214,6 +262,7 @@ class Butler(DatastoreButler):
         *,
         parameters: Mapping[GetParameter, Any] | None = None,
     ) -> DeferredDatasetHandle:
+        # Signature is inherited, but here it accepts not-expanded refs.
         ...
 
     @overload
@@ -227,6 +276,8 @@ class Butler(DatastoreButler):
         collections: CollectionPattern = None,
         **kwargs: DataIdValue,
     ) -> DeferredDatasetHandle:
+        # This overload is not inherited from LimitedButler, but it's unchanged
+        # from what we have now except for snake_case.
         ...
 
     def get_deferred(self, *args: Any, **kwargs: Any) -> DeferredDatasetHandle:
@@ -242,6 +293,7 @@ class Butler(DatastoreButler):
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], DeferredDatasetHandle]]:
+        # Signature is inherited, but here it accepts not-expanded refs.
         parameters = []
         refs = []
         for ref, parameters_for_ref in arg:
@@ -252,6 +304,7 @@ class Butler(DatastoreButler):
 
     @overload
     def get_uri(self, ref: DatasetRef) -> ResourcePath:
+        # Signature is inherited, but here it accepts not-expanded refs.
         ...
 
     @overload
@@ -263,6 +316,8 @@ class Butler(DatastoreButler):
         collections: CollectionPattern = None,
         **kwargs: DataIdValue,
     ) -> ResourcePath:
+        # This overload is not inherited from LimitedButler, but it's unchanged
+        # from what we have now except for snake_case.
         ...
 
     def get_uri(self, *args: Any, **kwargs: Any) -> ResourcePath:
@@ -274,9 +329,14 @@ class Butler(DatastoreButler):
         )
 
     def get_many_uris(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
+        # Signature is inherited, but here it accepts not-expanded refs.
         return super().get_many_uris(self._expand_existing_dataset_refs(refs))
 
     def unstore(self, refs: Iterable[DatasetRef]) -> None:
+        # Signature is inherited, but here it accepts not-expanded refs.  Note
+        # that this method still does Datastore-only removals, but here that
+        # includes removing Datastore records from Registry.  See
+        # BatchHelper.removal for dataset and collection removals.
         refs = self._expand_existing_dataset_refs(refs)
         raw_batch = RawBatch()
         with self._datastore.unstore_transaction(refs) as opaque_table_keys:
@@ -322,53 +382,38 @@ class Butler(DatastoreButler):
         This may be necessary to pick up new dataset types, collections, and
         governor dimension values added by other clients.
         """
-        self._registry.clear_caches()
+        raise NotImplementedError()
 
     ###########################################################################
     #
     # Full-butler-only query methods, adapted from the current public Registry
     # interface and prototyping to take better advantage of daf_relation.
     #
-    # Open questions / notable changes:
-    #
-    # - The query() method and the methods of the Query object it returns are
-    #   the power-user interface; it can do everything current methods can do
-    #   and more.
-    #
-    # - Everything else in this section (and a few methods in other sections
-    #   delegate to query() and Query(), so they can be implemented purely in
-    #   the concrete Butler class with no specialization for the SQL vs.  http.
-    #   Instead there are two implementations of various classes below Query.
-    #
-    # - The `resolve_dataset` method is the new Registry.findDataset, as well
-    #   as the entry point for all of the Butler logic that interprets
-    #   non-standard data IDs that Butler.get_many will call.  Most of that
-    #   will be delegated to Query, but some of it my need to live here in
-    #   order to have access to the full context in which non-standard data ID
-    #   keys should be interpreted.
-    #
-    # - The new `expand_datasets` method both expands DatasetRef data IDs to
-    #   include dimension records and expands the DatasetRefs themselves to
-    #   include all related DatastoreRecords.
-    #
-    # - query_data_ids and query_dimension_records no longer accept dataset and
-    #   collection constraints, as these were more often misused than used
-    #   correctly, and power-users like QG generation can use query().
-    #
-    # - queryDatasetAssociations has no direct replacement.  This was mostly
-    #   used to allow CALIBRATION collection timespans to be queried, and it
-    #   turns out there's really no good way to pack that functionality into
-    #   queryDatasets (now query_datasets), since it would necessitate
-    #   returning something other than DatasetRefs and I dislike changing
-    #   return types based on arguments (and so does MyPy).
-    #
-    # - query_collections and query_dataset_types now have options to constrain
-    #   results based on dataset type presence in collections, as has long been
-    #   requested.
-    #
     ###########################################################################
 
-    def query(self) -> Query:
+    def query(self, defer: bool = True) -> Query:
+        """Power-user interface and implementation point for queries.
+
+        Every other method in this section and a few methods in other sections
+        delegate to `query` and the `Query` object it returns so they can be
+        implemented purely in the concrete `Butler` class with no
+        specializations for the SQL vs. http.  Instead there would be two
+        implementations of various classes below `Query` (not shown in this
+        prototype).
+
+        This also replaces `Registry.queryDatasetAssociations`, as that does
+        not have a direct-counterpart replacement.
+
+        The ``defer`` argument here controls whether to immediately execute the
+        query and fetch all results or defer this, allowing a query to be built
+        up over the course of several chained method calls.  The default here
+        is to defer, but the simpler ``query_*`` methods later default to
+        running immediately.  Queries that have been executed can still be
+        chained upon, but this is much less efficient if the first execution
+        isn't useful in its own right.  The ``defer`` behavior is "sticky": the
+        default for all methods on `Query` is to defer or not based on how that
+        `Query` was created.
+        """
         return self._registry.query()
 
     def resolve_dataset(
@@ -382,9 +427,21 @@ class Butler(DatastoreButler):
         timespan: Timespan | None,
         **kwargs: DataIdValue,
     ) -> DatasetRef:
+        """The `resolve_dataset` method is the new `Registry.findDataset`, as
+        well as the entry point for all of the Butler logic that interprets
+        non-standard data IDs (e.g. day_obs + seq_num).
+
+        This will ultimately call `Query`, and I hope to move as much of the
+        logic as possible into `Query` itself so it can be used more generally.
+        But the most important thing is that we don't execute too many queries
+        from client-side logic here, as that'll lead to a lot of latency.  We
+        may need to add a new Registry method with essentially this signature
+        at first just so we can move all of that logic to the server ASAP.
+        """
         raise NotImplementedError("Will delegate to self.query()")
 
     def get_dataset(self, uuid: uuid.UUID) -> DatasetRef:
+        """Like the current Registry.getDataset."""
         raise NotImplementedError("Will delegate to self.query()")
 
     def _expand_new_dataset_refs(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
@@ -408,6 +465,12 @@ class Butler(DatastoreButler):
         raise NotImplementedError("Will delegate to self.query()")
 
     def expand_data_id(self, data_id: DataId, dimensions: Iterable[str], **kwargs: Any) -> DataCoordinate:
+        """Like the current Registry.expandDataId.
+
+        That means it's still a really bad idea to call this on lots of data
+        IDs in a loop rather than using something vectorized, but I think the
+        single-data ID expansion use case is important enough that we need to
+        keep it."""
         raise NotImplementedError("Will delegate to self.query()")
 
     def query_collections(
@@ -420,18 +483,51 @@ class Butler(DatastoreButler):
         having_datasets: Iterable[DatasetTypeName] | DatasetTypeName = (),
         exact: bool = True,
     ) -> CollectionQuery:
-        raise NotImplementedError("Will delegate to self.query()")
+        """Like the current Registry.queryCollections, with a few additions:
+
+        - The returned `CollectionQuery` object is a Sequence, but it's also
+          more than that.
+
+        - ``having_datasets`` and ``exact`` provide a way to get the
+          collections that have at least one dataset from each of a list of
+          dataset types (one can call query_collections multiple times to get
+          "collection with datatsets of any of the given  types" behavior
+          instead).
+        """
+        raise NotImplementedError(
+            """Will delegate to registry.query_collections and filtering of
+            client-side caches.  If ``having_datasets`` is not empty, will
+            delegate to `query` as well for further filtering.
+            """
+        )
 
     def query_dataset_types(
         self,
         pattern: DatasetTypePattern = ...,
         *,
-        # TODO: constrain on storage class or override storage class
+        # TODO: constrain on storage class or override storage class?
         dimensions: Iterable[str] = (),
-        collections: CollectionPattern = ...,
+        collections: CollectionPattern | None = None,
         exact: bool = True,
     ) -> DatasetTypeQuery:
-        raise NotImplementedError("Will delegate to self.query()")
+        """Like the current Registry.queryDatasetTypes, with a few additition:
+
+        - The returned `DatasetTypeQuery` object is a Mapping (keyed by name),
+          but it's also more than that.
+
+        - Let's make the ``collections`` argument actually work, and return
+          only dataset types with datasets in those collections.  We should
+          probably also make it default to `Butler.collections` when that is
+          set (for consistency with other methods, if nothing else), though
+          that might be a surprising behavior change.
+
+        """
+        raise NotImplementedError(
+            """Will delegate to registry.query_dataset_types and filtering of
+            client-side caches.  If ``collections`` is active, will delegate to
+            `query` as well for further filtering.
+            """
+        )
 
     def query_datasets(
         self,
@@ -443,8 +539,17 @@ class Butler(DatastoreButler):
         data_id: DataId | None = None,
         uuid: uuid.UUID | None = None,
         bind: Mapping[str, Any] | None = None,
+        defer: bool = False,
         **kwargs: DataIdValue,
     ) -> DatasetQueryChain:
+        """Like the current Registry.queryDatasets.
+
+        Main difference is that find_first=True by default, as it it probably
+        always should have been.
+
+        In addition, this now returns results immediately by default, as
+        controlled by ``defer`` (see `Butler.query`).
+        """
         raise NotImplementedError("Will delegate to self.query()")
 
     def query_data_ids(
@@ -454,8 +559,20 @@ class Butler(DatastoreButler):
         where: str = "",
         data_id: DataId | None = None,
         bind: Mapping[str, Any] | None = None,
+        defer: bool = False,
         **kwargs: DataIdValue,
     ) -> DataCoordinateQueryAdapter:
+        """Like the current Registry.queryDataIds, but with the ``datasets``
+        and ``collections`` arguments removed to encourage people to use
+        `query_datasets` instead.
+
+        The ``datasets`` and ``collections`` behavior can still be obtained by
+        using `query` directly, which is appropriate since it's more of a
+        power-user thing.
+
+        In addition, this now returns results immediately by default, as
+        controlled by ``defer`` (see `Butler.query`).
+        """
         raise NotImplementedError("Will delegate to self.query()")
 
     def query_dimension_records(
@@ -465,11 +582,24 @@ class Butler(DatastoreButler):
         where: str = "",
         data_id: DataId | None = None,
         bind: Mapping[str, Any] | None = None,
+        defer: bool = False,
         **kwargs: DataIdValue,
     ) -> DimensionRecordQueryAdapter:
+        """Like the current Registry.queryDimensionRecords, but with the
+        ``datasets`` and ``collections`` arguments removed to encourage people
+        to use `query_datasets` instead.
+
+        The ``datasets`` and ``collections`` behavior can still be obtained by
+        using `query` directly, which is appropriate since it's more of a
+        power-user thing.
+
+        In addition, this now returns results immediately by default, as
+        controlled by ``defer`` (see `Butler.query`).
+        """
         raise NotImplementedError("Will delegate to self.query()")
 
     def get_collection_chain(self, chain_name: CollectionName) -> Sequence[CollectionName]:
+        """Like the current Registry.getCollectionChain."""
         for _, collection_type, _, children in self.query().collections(chain_name).details():
             if children is None:
                 raise CollectionTypeError(
@@ -479,18 +609,20 @@ class Butler(DatastoreButler):
         raise MissingCollectionError(f"Collection {chain_name!r} not found.")
 
     def get_collection_documentation(self, name: CollectionName) -> CollectionDocumentation:
+        """Like the current Registry.getCollectionDocumentation."""
         for _, _, docs, _ in self.query().collections(name).details():
             return docs
         raise MissingCollectionError(f"Collection {name!r} not found.")
 
     def get_dataset_type(self, name: str) -> DatasetType:
+        """Like the current Registry.getDatasetType."""
         for dataset_type in self.query().dataset_types(name):
             return dataset_type
         raise MissingDatasetTypeError(f"Dataset type {name!r} does not exist.")
 
     ###########################################################################
     #
-    # Bulk transfers
+    # Transfers between data repositories.
     #
     ###########################################################################
 
@@ -504,6 +636,7 @@ class Butler(DatastoreButler):
         transfer: str | None = None,
         include_datastore_records: bool = True,
     ) -> ButlerExtractor:
+        # Inherited from DatastoreButler; reimplemented just to update types.
         return ButlerExtractor(
             self,
             raw_batch,
@@ -566,7 +699,7 @@ class Butler(DatastoreButler):
         -----
         The previous signature took TextIO in filename as well; I think that
         was just for execution butler creation, and going forward I think
-        that's a job for transfer_from instead of export/import.  If we want
+        that's a job for `transfer_from` instead of export/import.  If we want
         take I/O objects in addition URIs maybe we could integrate that into a
         ResourcePath constructor.
 
@@ -628,6 +761,37 @@ class Butler(DatastoreButler):
         transfer: str = "auto",
         record_validation_info: bool = True,
     ) -> Iterator[LimitedButlerExtractor]:
+        """Transfer content from one data repository to another, or from a
+        staging area (e.g. QuantumGraph execution results) to the repository
+        proper.
+
+        Parameters
+        ----------
+        source_butler
+            Butler representing the source repository.'
+        transfer
+            Transfer mode recognized by `ResourcePath`.
+        record_validation_info
+            Whether to record file sizes, checksums, etc.
+
+        Returns
+        -------
+        extractor_context
+            A context manager that when entered returns a helper object with
+            methods for indicating what should be transferred.  When the
+            context manager exits without error, the updates to the repository
+            are committed.
+
+        Notes
+        -----
+        For QuantumGraph execution transfer jobs (or anything else), we might
+        need a way to cycle though many source QuantumBackedButlers within one
+        batch, which we could do with another method on
+        ``LimitedButlerExtractor`` and its subclasses.  Another option might
+        be to make QuantumBackedButler capable of handling multiple quanta at
+        once (extending up to the full graph, which might be more useful for
+        other things).
+        """
         raw_batch = RawBatch()
         file_datasets: list[FileDataset] = []
 
@@ -667,6 +831,17 @@ class Butler(DatastoreButler):
 
     @contextmanager
     def batched(self) -> Iterator[BatchHelper]:
+        """Make multiple modifications to the data repository atomically.
+
+        Returns
+        -------
+        batch_context
+            A context manager that when entered returns a `BatchHelper`, which
+            provides various methods that modify the data repository.  These
+            methods do not act immediately and are not always applied in the
+            same order they are invoked.  When the context manager exits
+            without error all changes are applied.
+        """
         raw_batch = RawBatch()
         with ExitStack() as exit_stack:
             yield BatchHelper(self, raw_batch, exit_stack)
