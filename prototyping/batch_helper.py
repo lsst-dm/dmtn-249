@@ -240,9 +240,9 @@ class BatchHelper:
         if directory is not None:
             directory = ResourcePath(directory)
         opaque_table_data = self._exit_stack.enter_context(
-            self.butler._datastore.import_(
+            self.butler._datastore.receive(
                 datasets,
-                mode=transfer,
+                transfer=transfer,
                 own_absolute=own_absolute,
                 directory=directory,
                 record_validation_info=record_validation_info,

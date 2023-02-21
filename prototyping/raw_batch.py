@@ -167,7 +167,7 @@ class RawBatch:
     @classmethod
     def read_export_file(
         cls, file: ResourcePath, dimension_insert_mode: SetInsertMode | None = None
-    ) -> Iterator[tuple[DatastoreConfig, RawBatch, list[FileDataset]]]:
+    ) -> Iterator[tuple[DatastoreConfig | None, RawBatch, list[FileDataset]]]:
         """Read an export file, yielding batches of inserts and FileDatsets.
 
         This will support reading our current YAML export files, yielding a
@@ -180,10 +180,16 @@ class RawBatch:
         raise NotImplementedError()
 
     def write_export_file(
-        self, file: ResourcePath, datastore_config: DatastoreConfig, file_datasets: Iterable[FileDataset]
+        self,
+        file: ResourcePath,
+        datastore_config: DatastoreConfig | None,
+        file_datasets: Iterable[FileDataset],
     ) -> None:
         """Append this batch to an export file."""
         raise NotImplementedError()
+
+    def clear(self) -> None:
+        raise NotImplementedError("TODO: clear all nested data structures.")
 
     dataset_type_registrations: dict[DatasetTypeName, DatasetTypeRegistration] = dataclasses.field(
         default_factory=dict
@@ -193,11 +199,11 @@ class RawBatch:
         default_factory=dict
     )
 
+    dimension_syncs: dict[DimensionElementName, DimensionDataSync] = dataclasses.field(default_factory=dict)
+
     dimension_insertions: dict[DimensionElementName, DimensionDataInsertion] = dataclasses.field(
         default_factory=dict
     )
-
-    dimension_syncs: list[DimensionDataSync] = dataclasses.field(default_factory=list)
 
     dataset_insertions: DatasetInsertionBatch = dataclasses.field(default_factory=DatasetInsertionBatch)
 
@@ -247,7 +253,10 @@ class RawBatchExport:
     files: dict[str, tuple[FormatterName | None, set[uuid.UUID]]]
     """Files for the Datastore to transfer and insert.
 
-    `str` keys are absolute or relative URIs.
+    `str` keys are absolute or relative URIs, with the latter relative to the
+    export directory, never a datastore root (those should be transformed to
+    absolute URIs, since we never want two non-nested datastores to think they
+    own the same artifact).
 
     UUIDs here must correspond to datasets present in
     `batch.dataset_insertions` (or, if we can make that work, the receiving

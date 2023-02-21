@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable, Iterator, Mapping, Sequence, Set
-from contextlib import ExitStack, contextmanager
+from collections.abc import Iterable, Iterator, Mapping, Sequence, Set, Callable
+from contextlib import ExitStack, contextmanager, AbstractContextManager
 from typing import Any, overload
 
 from lsst.daf.butler import (
@@ -21,7 +21,6 @@ from lsst.daf.butler import (
     Timespan,
 )
 from lsst.daf.butler.registry import CollectionTypeError, MissingCollectionError, MissingDatasetTypeError
-from lsst.daf.butler.transfers import RepoExportContext
 from lsst.resources import ResourcePath, ResourcePathExpression
 
 from .aliases import (
@@ -38,7 +37,8 @@ from .aliases import (
 )
 from .batch_helper import BatchHelper
 from .datastore_butler import DatastoreButler
-from .limited_butler import LimitedButler
+from .datastore import DatastoreConfig
+from .limited_butler import LimitedButler, LimitedButlerExtractor
 from .primitives import DatasetRef, DatasetType, SequenceEditMode, SetEditMode, SetInsertMode
 from .queries import (
     CollectionQuery,
@@ -50,6 +50,7 @@ from .queries import (
 )
 from .raw_batch import RawBatch
 from .registry import Registry
+from .butler_extractor import ButlerExtractor
 from .removal_helper import RemovalHelper
 
 
@@ -493,24 +494,50 @@ class Butler(DatastoreButler):
     #
     ###########################################################################
 
-    @contextmanager
+    def _make_extractor(
+        self,
+        raw_batch: RawBatch,
+        file_datasets: dict[ResourcePath, list[FileDataset]],
+        on_commit: Callable[[DatastoreConfig | None], None],
+        *,
+        directory: ResourcePath | None,
+        transfer: str | None = None,
+        include_datastore_records: bool = True,
+    ) -> ButlerExtractor:
+        return ButlerExtractor(
+            self,
+            raw_batch,
+            file_datasets,
+            on_commit,
+            directory=directory,
+            transfer=transfer,
+            include_datastore_records=include_datastore_records,
+        )
+
     def export(
         self,
-        *,
-        directory: ResourcePathExpression | None = None,
         filename: ResourcePathExpression | None = None,
-        format: str | None = None,
+        *,
         transfer: str | None = None,
-    ) -> Iterator[RepoExportContext]:
-        raise NotImplementedError("TODO")
+        directory: ResourcePathExpression | None = None,
+        include_datastore_records: bool = True,
+    ) -> AbstractContextManager[ButlerExtractor]:
+        # Override exists just to declare more-derived return type;
+        # DatastoreButler.export does all the real work, in part by delegating
+        # back to `_make_extractor`.
+        return super().export(
+            directory=directory,
+            filename=filename,
+            transfer=transfer,
+            include_datastore_records=include_datastore_records,
+        )
 
     def import_(
         self,
-        *,
-        directory: ResourcePathExpression | None = None,
         filename: ResourcePathExpression | None = None,
-        own_absolute: bool = False,
+        *,
         transfer: str | None = None,
+        directory: ResourcePathExpression | None = None,
         dimension_insert_mode: SetInsertMode | None = None,
         record_validation_info: bool = True,
     ) -> None:
@@ -525,17 +552,12 @@ class Butler(DatastoreButler):
             Name of the file that describes the repository context.  If
             relative, will be assumed to be relative to ``directory``.  If not
             provided, standard filenames within ``directory`` will be tried.
-        own_absolute, optional
-            If `True`, transfer even absolute URIs outside the Datastore root
-            into the Datastore's location and assume ownership of them.  If
-            `False`, these URIs are ingested as external files with absolute
-            URIs that are known to the Datastore but never deleted by it.
         transfer, optional
             Transfer mode recognized by `ResourcePath`.
         dimension_insert_mode, optional
             Enum value that controls how to resolve conflicts between dimension
             data in the export file and dimension data already in the
-            repository.
+            repository.  Overrides the insert mode set in the file, if any.
         record_validation_info, optional
             Whether Datastore should record checksums and sizes (etc) for the
             transferred datasets.
@@ -568,34 +590,78 @@ class Butler(DatastoreButler):
         ):
             if datastore_config is not None:
                 opaque_data = (datastore_config, raw_batch.opaque_table_insertions)
-            with self._datastore.import_(
-                file_datasets,
+            with self._datastore.receive(
+                {directory: file_datasets},
                 transfer=transfer,
-                own_absolute=own_absolute,
-                directory=directory,
                 record_validation_info=record_validation_info,
                 opaque_data=opaque_data,
             ) as opaque_table_rows:
                 raw_batch.opaque_table_insertions = opaque_table_rows
                 self._registry.apply_batch(raw_batch)
 
+    @overload
+    def transfer_from(
+        self,
+        source_butler: Butler,
+        source_refs: Iterable[DatasetRef],
+        transfer: str = "auto",
+        record_validation_info: bool = True,
+    ) -> AbstractContextManager[ButlerExtractor]:
+        # Overload that takes a full Butler and returns a full ButlerExtractor.
+        ...
+
+    @overload
     def transfer_from(
         self,
         source_butler: LimitedButler,
-        source_refs: Iterable[DatasetRef],
         transfer: str = "auto",
-        skip_missing: bool = True,
-        register_dataset_types: bool = False,
-        transfer_dimensions: bool = False,
-    ) -> list[DatasetRef]:
-        raise NotImplementedError("TODO")
+        record_validation_info: bool = True,
+    ) -> AbstractContextManager[LimitedButlerExtractor]:
+        # Overload that takes a LimitedButler and returns a
+        # LimitedButlerExtractor.
+        ...
+
+    @contextmanager
+    def transfer_from(
+        self,
+        source_butler: LimitedButler,
+        transfer: str = "auto",
+        record_validation_info: bool = True,
+    ) -> Iterator[LimitedButlerExtractor]:
+        raw_batch = RawBatch()
+        file_datasets: list[FileDataset] = []
+
+        def on_commit(datastore_config: DatastoreConfig | None) -> None:
+            if datastore_config is not None:
+                opaque_data = (datastore_config, raw_batch.opaque_table_insertions)
+            with self._datastore.receive(
+                file_datasets,
+                datastore_config,
+                opaque_data=opaque_data,
+                transfer=transfer,
+                record_validation_info=record_validation_info,
+            ) as opaque_table_rows:
+                raw_batch.opaque_table_insertions = opaque_table_rows
+                self._registry.apply_batch(raw_batch)
+            raw_batch.clear()
+            file_datasets.clear()
+
+        extractor = source_butler._make_extractor(
+            raw_batch,
+            file_datasets,
+            on_commit,
+            transfer=None,  # receiving butler will transfer.
+        )
+        del on_commit
+        yield extractor
+        extractor.commit()
 
     ###########################################################################
     #
     # Batch-capable mutators.
     #
     # Everything after the `batched` method here is just a convenience forward
-    # to an identical method on `BatchHelper`; see thoe for comments and docs.
+    # to an identical method on `BatchHelper`; see those for comments and docs.
     #
     ###########################################################################
 
