@@ -85,21 +85,20 @@ Note that later sections in this technical note will expand upon these and ultim
    This will also typically occur well before the rest of the ``put``, as part of QuantumGraph generation.
 
 3. Perform the ``Datastore.put`` operation, writing the file artifacts associated with the dataset and returning records to the Butler.
+   When the Datastore is backed by storage that requires signed URLs, this includes first obtaining a signed URI from the server.
    Datastore can be expected to make this operation atomic, either because it is naturally atomic for its storage backing or via writing a temporary and moving it.
    We do have to accept the possibility of failures leaving partially-written temporary files around.
-   When the Datastore is backed by storage that requires signed URLs, this write is to a staging area and uses non-signed URIs.
 
 4. If the butler has a Registry, either held directly (as in a "full butler" today) or as a client of a butler server, call ``Registry.insertDatasets`` with both the ``DatasetRef`` and the records returned by the Datastore.
    Database transactions can be used to ensure that all tables in the Registry (including those for datastore records) are updated consistently or left unchanged.
    If this operation fails, or the butler does not have a Registry (e.g. ``QuantumBackedButler``), the dataset is left in a valid state: it is in the Datastore, but not the Registry.
-   If the Datastore is backed by storage that requires signed URLs, this call also tells the server to transfer the artifacts from the staging area to permanent storage after checking for permissions.
    This must happen before the database changes are committed.
 
 This has two major advantages over our current ``put`` implementation:
 
 - there is no database transaction over the Datastore write, keeping transactions small and reducing contention for database connections;
 
-- for a client/server butler, there is no alternation between object-store and http operations, just one and then the other, reducing latency (assuming the data ID has indeed been obtained in advance), and increasing the possiblity that the client Datastore can just be a regular ``FileDatastore``.
+- for a client/server butler, there is little alternation between object-store and http operations, reducing latency (assuming the data ID has indeed been obtained in advance) and increasing the possibility that the client Datastore can just be a regular ``FileDatastore``.
   Any database transactions needed can also happen entirely in a single server operation.
 
 This change will make it so Datastore sees conflicting writes before Registry.
@@ -113,7 +112,6 @@ The easiest way to do this is to configure Datastore storage backends to prohibi
 These operations would behave like vectorized versions of ``Butler.put``, with all Datastore writes (if nontrivial transfers are required) occurring before a single Registry or butler server operation that (within a transaction) adds datasets and the associated datastore records to the database.
 
 For ``Butler.import``, however, we also need to add dimension data, and register collections and dataset types, and not all of these can be performed in transactions.
-When these are present, I propose we add them first, prior to the Datastore operations, and do not attempt to make them atomic.
 These are already idempotent operations, which already allows users to retry a failed import without concern that the previous one will get in the way, and that's what's most important here.
 
 These operations have a greater chance than a single ``put`` of leaving us with Datastore-only files due to failures, since either a late Datastore copy or link failure or a Registry failure will leave all previous Datastore copy or link successes in place.
@@ -126,6 +124,8 @@ These operations have a greater chance than a single ``put`` of leaving us with 
    ``QuantumBackedButler`` will look up datastore records directly in the quantum.
 
 2. Call ``Datastore.get`` with both the resolved ``DatasetRef`` and the bundle of records, returning the result to the caller.
+   If the datastore requires signed URIs, those will have to be obtained at
+   this stage.
 
 Because this is a read-only operation, consistency in the presence of failures is not a concern, but this still has a major advantage over the current approach for client-server in particular, as it bundles all http server access into a single call, followed by a direct object-store call, reducing latency and again allowing the Datastore to be a regular ``FileDatastore``.
 
@@ -145,14 +145,7 @@ This is a proposed new interface for removing multiple datasets from the Datasto
 Once again, we've eliminated any alternation between database/server calls and Datastore operations, reducing latency.
 We've also avoided any database transactions over datastore operations.
 
-
-``Butler.purge``
-""""""""""""""""
-
-This is another new proposed interface, this time for fully removing multiple datasets from both Registry and Datastore.
-It's the rest of the replacement for ``Butler.pruneDatasets`` and reimplementation for ``Butler.removeRuns``.
-
-The approach here is essentially identical to ``Butler.unstore``, but in the first step we would instruct the Registry to remove all references to the datasets, not just the datastore records.
+When fully removing multiple datasets from both Registry and Datastore (interfaces for this will be described later), we would follow the same approach, but in the first step we would instruct the Registry to remove all references to the datasets, not just the datastore records.
 
 .. _adding_journal_files:
 
@@ -180,10 +173,10 @@ A SQL-backed Datastore that transforms in-memory datasets fully into Datastore r
 
 One unique and particularly important type of journal file is one that signals an ongoing QuantumGraph execution that has not yet been transferred back.
 This could be a pointer to the QuantumGraph file or even the QuantumGraph file itself, since a QuantumGraph already carries all the information needed to find all datasets that may have been written and not transferred back as part of its execution.
-This will be discussed in greater detail in a later section; for now the important criteria is that at the start of any QuantumGraph execution with ``QuantumBackedButler`` (I'm assuming Execution Butler will not exist soon) we will create a journal file that is the QuantumGraph, points to the QuantumGraph, or contains a list of all datasets the QuantumGraph's execution might produce.
+This will be discussed in greater detail in a later section; for now the important criteria is that at the start of any QuantumGraph execution with ``QuantumBackedButler`` (I'm assuming Execution Butler will not exist soon) we will create a journal file that either is the QuantumGraph, points to the QuantumGraph, or contains a list of all datasets the QuantumGraph's execution might produce.
 When the transfer job for that execution completes successfully, that journal file is removed.
 
-Changing the journal file format should be considered a data repository migration, and all migrations should require that the data repository have no active journal files.
+Changing the journal file format should be considered a data repository migration, and all migrations should require that the data repository have no active journal files unless they are able to migrate those files as well.
 
 Implementation of important butler operations
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -200,20 +193,17 @@ For a client/server Butler the journal creation and deletion could happen in the
 ``Butler.import`` and ``Butler.transfer_from``
 """"""""""""""""""""""""""""""""""""""""""""""
 
-As with ``put``, we would write a journal file before the Datastore operations begin and delete it after Registry dataset writes succeed.
-Imports of dimension data, collections, and dataset types would happen before the journal file is written.
-``transfer_from`` (at least) would need to turn off its own journaling in favor of a higher-level one representing a QuantumGraph execution, when it is used in the transfer job for that execution.
-This suggests that we might want to make the public interfaces for transfer-from-graph and transfer-from-other-butler more distinct, and possibly make the former private.
+As with ``put``, we would write a journal file before the Datastore operations begin and delete it after Registry writes succeed.
 
 ``Butler.get``
 """"""""""""""
 
 No journaling is needed, as this is a read-only operation.
 
-``Butler.unstore`` and ``Butler.purge``
-"""""""""""""""""""""""""""""""""""""""
+``Butler.unstore`` and other removals
+"""""""""""""""""""""""""""""""""""""
 
-The journal file should be written before ``Registry`` transaction is committed and deleted only after all Datastore deletions succeed.
+The journal file should be written before the ``Registry`` transaction is committed and deleted only after all Datastore deletions succeed.
 This is slightly problematic for client/server, because the journal file will need to be populated with information we get from the Registry database; this means the client cannot be responsible for creating the journal file unless we make fetching the datastore records and deleting them separate operations.
 That isn't too bad - it's just a slight increase in latency and a bit more http traffic.
 Another alternative would be to have the server take responsibility for creating the journal file, and then either returning responsibility for its deletion to the client or taking responsibility for both the deletion of the Datastore artifacts and the deletion of the journal file.
@@ -232,25 +222,28 @@ Public interface changes
 .. note::
    It's all stubs and outlines from here on.
 
-Bundling DatasetRef with Datastore records
+Bundling Datastore records with DatasetRef
 ------------------------------------------
 
-- If we're passing around DatasetRefs and bundles of datastore records together a lot, we should have a class for that.
-- This would logically be what a QuantumGraph stores.
-- This + a datastore would be what backs a DeferredDatasetHandle, if we don't want that hitting a butler server or Registry unnecessarily.
-- This might replace FileLocation.
+The proposed changes to how datastore records are handled means that we will be passing `DatasetRef` instances and their associated datastore records to datastore together, essentially all of the time.
+But obtaining a `DatasetRef` from the the Registry is not just something done by Butler code; it's also something users do directly via query methods.
+
+This suggests that we should attach those datastore records to the `DatasetRef` objects themselves, both to simplify the signatures of methods that accept or return them together, and to allow the queries used to obtain a `DatasetRef` to provide everything needed to actually retrieve the associated dataset.
+
+This constitutes a new definition of an "expanded" `DatasetRef`: one that holds not just an expanded data ID, but a bundle of datastore records as well.
 
 Butler methods vs. Butler.registry methods
 ------------------------------------------
 
-- I've totally come around to the idea of Butler being the only provider of public interfaces, and we should move all useful Registry methods there, at the same time we define a richer set of ABCs for various aspects of Butler interfaces.
-- Registry would become a nonpolymorphic concrete class used by one Butler subclass and the Butler server.
-- A lot of Registry's convenience functionality should move to Butler.
-- I think Registry's caching should move to Butler.
-- Registry's default collections and governor data ID values should definitely move to Butler.
-- Some of the convenience logic in the butler CLI scripts should also move to Butler.
-- We should modernize the query interfaces when we invent their Butler versions and deprecate the Registry ones, to take advantage of new ``daf_relation`` functionality.
-- I still like the idea of having a all Butler objects hold a Datastore, with one Datastore ABC adequate for all different Butlers.
+One outcome of :jira:`RFC-888` was that users disliked having to remember which aspects of the butler public interface were on the `Butler` class vs. the `Registry` it holds.
+It's also confusing that `Butler.registry` and `Butler.datastore` both appear to be public attributes, but only the former really is (and some of its methods are not really intended for external use, either).
+Moving all of the public `Registry` interface to `Butler` and making `Butler.registry` (and `Butler.datastore`) private would be a major change, but it's the kind of change that would also help us with other changes:
+
+- It lets us repurpose `Registry` as an internal polymorphic interface focused on abstracting over the differences between a direct SQL backend and an http backend, while leaving common user-focused client code to `Butler`.
+
+- It gives us a clear boundary and deprecation point for other needed (or at least desirable) API changes, in that new versions of methods can differ from their current ones without having to work out a deprecation path that allows new and old behavior to be supported by the same signature.
+
+In addition to moving convenience code out of `Registry` and into `Butler`, we'll also need to move our caching (of collections, dataset types, and certain dimension records) to the client, and it'll certainly be better to put that in one client class (i.e. `Butler`) that replicate it across both `Registry` client implementations.
 
 QuantumDirectory
 ================
