@@ -46,11 +46,6 @@ class DatastoreButler(LimitedButler):
         opaque_table_data = self._datastore.put_many(pairs)
         return opaque_table_data.attach_to([ref for _, ref in pairs])
 
-    def predict_put_many(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
-        refs = list(refs)
-        opaque_table_data = self._datastore.predict_put_many(refs)
-        return opaque_table_data.attach_to(refs)
-
     def get_many(
         self,
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],

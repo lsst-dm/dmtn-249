@@ -194,7 +194,7 @@ class Butler(DatastoreButler):
         for obj, ref in arg:
             objs_by_uuid[ref.uuid] = obj
             refs.append(ref)
-        expanded_refs = self._expand_new_dataset_refs(refs)
+        expanded_refs = self._registry.expand_new_dataset_refs(refs, sign=True)
         pairs = [(objs_by_uuid[ref.uuid], ref) for ref in expanded_refs]
         raw_batch = RawBatch()
         raw_batch.dataset_insertions.include(expanded_refs)
@@ -206,8 +206,14 @@ class Butler(DatastoreButler):
         return raw_batch.opaque_table_insertions.attach_to(refs)
 
     def predict_put_many(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
-        # Signature is inherited, but here it accepts not-expanded refs.
-        return super().predict_put_many(self._expand_new_dataset_refs(refs))
+        """Return an iterable of `DatasetRef` objects that have been augmented
+        with datastore records as if they had been passed to `put_many`.
+
+        This is intended to be used by QuantumGraph generation to pre-populate
+        datastore records for intermediates as well as inputs.
+        """
+        # Not sure we care one way or another about signing here.
+        return self._registry.expand_new_dataset_refs(refs, sign=True)
 
     @overload
     def get(
@@ -252,7 +258,7 @@ class Butler(DatastoreButler):
         for ref, parameters_for_ref in arg:
             parameters.append(parameters_for_ref)
             refs.append(ref)
-        refs = list(self._expand_existing_dataset_refs(refs))
+        refs = list(self._registry.expand_existing_dataset_refs(refs, sign_for_get=True))
         return super().get_many(zip(refs, parameters))
 
     @overload
@@ -299,7 +305,7 @@ class Butler(DatastoreButler):
         for ref, parameters_for_ref in arg:
             parameters.append(parameters_for_ref)
             refs.append(ref)
-        refs = list(self._expand_existing_dataset_refs(refs))
+        refs = list(self._registry.expand_existing_dataset_refs(refs, sign_for_get=True))
         return super().get_many_deferred(zip(refs, parameters))
 
     @overload
@@ -330,14 +336,15 @@ class Butler(DatastoreButler):
 
     def get_many_uris(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
         # Signature is inherited, but here it accepts not-expanded refs.
-        return super().get_many_uris(self._expand_existing_dataset_refs(refs))
+        # Do we want signed URIs here?  Should that be an option for the user?
+        return super().get_many_uris(self._registry.expand_existing_dataset_refs(refs))
 
     def unstore(self, refs: Iterable[DatasetRef]) -> None:
         # Signature is inherited, but here it accepts not-expanded refs.  Note
         # that this method still does Datastore-only removals, but here that
         # includes removing Datastore records from Registry.  See
         # BatchHelper.removal for dataset and collection removals.
-        refs = self._expand_existing_dataset_refs(refs)
+        refs = self._registry.expand_existing_dataset_refs(refs, sign_for_unstore=True)
         raw_batch = RawBatch()
         with self._datastore.unstore_transaction(refs) as opaque_table_keys:
             raw_batch.opaque_table_removals.update(opaque_table_keys)
@@ -442,26 +449,6 @@ class Butler(DatastoreButler):
 
     def get_dataset(self, uuid: uuid.UUID) -> DatasetRef:
         """Like the current Registry.getDataset."""
-        raise NotImplementedError("Will delegate to self.query()")
-
-    def _expand_new_dataset_refs(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
-        """Expand data IDs in datasets that are assumed not to exist in the
-        Registry.
-
-        An expanded version of every given ref must be returned.  If one or
-        more dataset refs already exist in the registry, the implementation may
-        fail or ignore the fact that they exist.
-        """
-        raise NotImplementedError("Will delegate to self.query()")
-
-    def _expand_existing_dataset_refs(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
-        """Expand data IDs in datasets that are assumed to exist in the
-        Registry.
-
-        Datasets that do not actually exist in the Registry need not be
-        returned, but implementations should trust already-expanded content in
-        the given refs to avoid unnecessary queries.
-        """
         raise NotImplementedError("Will delegate to self.query()")
 
     def expand_data_id(self, data_id: DataId, dimensions: Iterable[str], **kwargs: Any) -> DataCoordinate:

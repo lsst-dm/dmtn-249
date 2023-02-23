@@ -43,4 +43,7 @@ always held by some outer data structure.
 
 These need to be built-ins or pydantic models so we can serialize them
 directly.
+
+For datastores that use signed URIs, each row should always hold the
+original unsigned URI and may optionally hold a signed URL as well.
 """

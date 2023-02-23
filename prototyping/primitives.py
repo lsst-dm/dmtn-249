@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import dataclasses
 import enum
-from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Set
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from uuid import UUID
 
-from lsst.daf.butler import DataCoordinate, StorageClass, ddl
+from lsst.daf.butler import DataCoordinate, StorageClass
 
 if TYPE_CHECKING:
     from .aliases import (
         CollectionName,
-        ColumnName,
         DatasetTypeName,
         DimensionName,
         OpaqueTableName,
@@ -93,52 +91,6 @@ class DatasetRef:
     class-private, but we at least don't want users modifying it, and we may
     or may not want them looking at it.
     """
-
-
-class OpaqueTableDefinition(ABC):
-    """Object that represents the definition of an opaque table.
-
-    Datastores construct these to describe what they need; Butler takes them
-    from Datastore and gives them to Registry; Registry holds them and uses
-    them to create and query tables without caring about the details.
-
-    I'm still thinking vaguely about opaque tables being used by things other
-    than Datastore (e.g. if we ever get around to storage-class-specific
-    metadata tables).  But I think I'm willing to lock us into dataset UUIDs
-    always being [part of] the primary key to try to reduce complexity.
-
-    This class's methods interface with an  ``OpaqueTableValues`` alias that's
-    really just `typing.Any` under the hood (see docstring in aliases.py).
-    I'm using `Any` not just to avoid being overly specific here: this is a
-    type erasure pattern, in which each OpaqueTableDefinition implementation
-    probably has its own preferred type for OpaqueTableValues, but nothing else
-    cares what it is.  Using `Any` avoids a lot of casts, and not using `Any`
-    (but casting all over the place) isn't any type-safer.
-    """
-
-    @property
-    @abstractmethod
-    def name(self) -> OpaqueTableName:
-        raise NotImplementedError()
-
-    @property
-    @abstractmethod
-    def spec(self) -> ddl.TableSpec:
-        raise NotImplementedError()
-
-    @abstractmethod
-    def values_to_raw(self, uuid: UUID, values: OpaqueTableValues) -> Iterable[dict[ColumnName, Any]]:
-        """Convert from the OpaqueTableValues type used for this opaque table
-        to dictionaries of built-ins that can be passed directly to SQLALchemy.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def raw_to_values(self, rows: Iterable[Mapping[ColumnName, Any]]) -> dict[UUID, OpaqueTableValues]:
-        """Convert from an iterable of SQLAlchemy-friendly mappings to a
-        mapping of OpaqueTableValues keyed by UUID.
-        """
-        raise NotImplementedError()
 
 
 class OpaqueTableKeyBatch:

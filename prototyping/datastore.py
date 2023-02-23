@@ -95,21 +95,12 @@ class Datastore(ABC):
         external datastore transaction (such as QuantumGraph execution) is
         already under way.
 
+        Incoming `DatasetRef` objects will have already been fully expanded to
+        include both expanded data IDs and opaque table records (as predicted
+        by `DatastoreBridge.make_opaque_values` and signed by
+        `DatastoreBridge.sign_opaque_value`).
+
         Full `Butler` should use `put_many_transaction` instead.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def predict_put_many(self, refs: Iterable[DatasetRef]) -> OpaqueTableBatch:
-        """Generate the opaque table records that would be returned by
-        `put_many` or `put_many_transaction` if called with the given
-        `DatasetRef` iterable, without actually writing any datasets to
-        storage.
-
-        This will have to omit "validation" columns like sizes and checksums
-        that might be included by a real ``put`` operation; this is fine as
-        as the omitted columns are not needed for existence checks or
-        ``get_many``.
         """
         raise NotImplementedError()
 
@@ -121,6 +112,11 @@ class Datastore(ABC):
     ) -> AbstractContextManager[OpaqueTableBatch]:
         """Insert new datasets for in-memory objects within a journal-file
         transaction.
+
+        Incoming `DatasetRef` objects will have already been fully expanded to
+        include both expanded data IDs and opaque table records (as predicted
+        by `DatastoreBridge.make_opaque_values` and signed by
+        `DatastoreBridge.sign_opaque_value`).
 
         Notes
         -----

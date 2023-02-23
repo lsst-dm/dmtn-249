@@ -85,7 +85,6 @@ Note that later sections in this technical note will expand upon these and ultim
    This will also typically occur well before the rest of the ``put``, as part of QuantumGraph generation.
 
 3. Perform the ``Datastore.put`` operation, writing the file artifacts associated with the dataset and returning records to the Butler.
-   When the Datastore is backed by storage that requires signed URLs, this includes first obtaining a signed URI from the server.
    Datastore can be expected to make this operation atomic, either because it is naturally atomic for its storage backing or via writing a temporary and moving it.
    We do have to accept the possibility of failures leaving partially-written temporary files around.
 
@@ -124,8 +123,6 @@ These operations have a greater chance than a single ``put`` of leaving us with 
    ``QuantumBackedButler`` will look up datastore records directly in the quantum.
 
 2. Call ``Datastore.get`` with both the resolved ``DatasetRef`` and the bundle of records, returning the result to the caller.
-   If the datastore requires signed URIs, those will have to be obtained at
-   this stage.
 
 Because this is a read-only operation, consistency in the presence of failures is not a concern, but this still has a major advantage over the current approach for client-server in particular, as it bundles all http server access into a single call, followed by a direct object-store call, reducing latency and again allowing the Datastore to be a regular ``FileDatastore``.
 
@@ -216,6 +213,34 @@ Which of these is preferable probably depends on whether we want these operation
    TODO: think about how all of this affects disassembled composites.
    Or get rid of them!  I am pretty confident now that we'll never need them, and dropping that before we embark on other major changes to Datastore seems wise (sorry, Tim).
 
+.. _including-signed-urls-for-access-control:
+
+Including signed URLs for access control
+----------------------------------------
+
+Our access control model for the official Rubin Observatory data repositories (see :cite:`DMTN-169`) is based on information stored in the Registry - collection names, whenever possible, and new naming conventions or new columns in contexts (e.g. dimension records or dataset type names) that are not associated with collections.
+Access to the associated files managed by a Datastore is mediated by signed URLs; once the server side of the remote Butler has determined that an API call is permitted (based on that the Registry-side information), it can generate one or more signed URLs to pass to Datastore that provide direct access to the controlled files.
+A seemingly natural place to include URL-signing in this proposal is inside the Datastore implementation, since only the Datastore knows where any URLs might exist in the opaque-to-Registry records it uses, and only the Datastore ever uses and kind of URLs.
+This approach has two major drawbacks, however:
+
+- It requires the Datastore to have a server component; in every other respect we can abstract the differences between a SQL-backed full Butler and a client/server full Butler via a different Registry implementation (see :ref:`public-interface-changes`).
+
+- Because the information used to determine whether a URL *should* be signed lives in the Registry, a Datastore server cannot easily perform this job.
+  It cannot trust information provided to it via the `DatasetRef` and opaque table records passed to it from Butler in terms of access control, since those come from a public http interface; instead it'd have to use a Registry of its own to re-obtain Datastore records and collection information for each UUID it is passed in order to determine whether to sign URLs embedded in the records.
+  This is a potential efficiency concern, and while we could probably use caching to mitigate that, caching often increases complexity is subtle ways.
+
+Our alternative proposal here is to instead make Registry responsible for signing URLs, using a small piece of server-side Datastore-provided logic to interpret the opaque records just enough for it to perform this job.
+Registry already needs to be told about the schemas of the of the opaque tables enough to create SQL tables, insert rows into them, and query for those rows, and that information can only come from Datastore, so it's a small leap from that to also having Datastore tell Registry (in these schema-definition objects) where to find URLs that must be signed.
+
+This is most straightforward for read and deletion operations, for which unsigned URLs are already stored in opaque tables in the Registry database, and we can transform them into signed URLs before we send them back to Butler client for use.
+
+For `Butler.put`, it would be most efficient to have the Registry generate signed URLs at the same time it expands data IDs for (potential) use in URI templates, since both of these need to be done on the server.
+We also need to generate UUIDs for new datasets, and have thus far been vague about which component has that responsibility.
+Doing all of this in the Registry makes sense, which amounts to essentially making it *indirectly* responsible not just for storing Datastore records, but for creating at least the initial versions of them as well (including URI templates), by delegating that work to the same schema-definition objects it already receives from Datastore.
+This means a substantial fraction of a Datastore's logic will actually be executed on the server, as part of the the Registry, and that these schema-definition objects have hence really evolved into something more: they are the new Datastore-Registry "bridge" interface.
+
+.. _public-interface-changes:
+
 Public interface changes
 ========================
 
@@ -231,6 +256,11 @@ But obtaining a `DatasetRef` from the the Registry is not just something done by
 This suggests that we should attach those datastore records to the `DatasetRef` objects themselves, both to simplify the signatures of methods that accept or return them together, and to allow the queries used to obtain a `DatasetRef` to provide everything needed to actually retrieve the associated dataset.
 
 This constitutes a new definition of an "expanded" `DatasetRef`: one that holds not just an expanded data ID, but a bundle of datastore records as well.
+
+Combined with the conclusion of :ref:`including-signed-urls-for-access-control`, this means we'd be returning signed URLs in the `DatasetRef` objects returned by query methods.
+This is mostly a good thing - it makes those refs usable for reading datasets directly and it completely avoids redundant registry lookups in usual workflows.
+But it does increase the duration we'd want a typical signed URI to be valid for - instead of the time it takes to do a single operation, it'd be more like the time it takes the results of a query in one cell of a notebook to be used in another cell.
+While that's arbitrarily long in general, I don't think it's unreasonable to either tell users that refs will get stale after a while, or just add timestamps to signed URIs so we can spot them and refresh them as necessary when ``get`` is called.
 
 Butler methods vs. Butler.registry methods
 ------------------------------------------
