@@ -79,7 +79,7 @@ Note that later sections in this technical note will expand upon these and ultim
 """"""""""""""
 
 1. Obtain a valid expanded data ID from the Registry.
-   In the vast majority of cases (i.e. QuantumGraph execution) this done well in advance of the actual ``put`` call.
+   In the vast majority of cases (i.e. QuantumGraph execution) this is done well in advance of the actual ``put`` call.
 
 2. Construct a ``DatasetRef`` by generating an appropriate UUID and using an existing or soon-to-exist RUN name.
    This will also typically occur well before the rest of the ``put``, as part of QuantumGraph generation.
@@ -244,8 +244,10 @@ This means a substantial fraction of a Datastore's logic will actually be execut
 Public interface changes
 ========================
 
-.. note::
-   It's all stubs and outlines from here on.
+This package's source repository includes a ``prototyping`` directory full of Python files (mostly just interface stubs) that attempt to work out the proposal in detail.
+This section and :ref:`internal-interface-changes` further motivate and describe that detailed proposal at a high level and occasionally include snippets from it, but it should be inspected directly to see the complete pictures.
+The ``README.rst`` file in that directory includes important caveats that should be read first.
+The most important is that this is in many respects a "maximal" proposal or "vision document" - it represent an attempt to envision how future Butler, Registry, and Datastore interfaces would ideally look (including a full switch to ``snake_case`` naming), with the expectation that many of these changes will never come to pass.
 
 Bundling Datastore records with DatasetRef
 ------------------------------------------
@@ -271,12 +273,55 @@ Moving all of the public `Registry` interface to `Butler` and making `Butler.reg
 
 - It lets us repurpose `Registry` as an internal polymorphic interface focused on abstracting over the differences between a direct SQL backend and an http backend, while leaving common user-focused client code to `Butler`.
 
-- It gives us a clear boundary and deprecation point for other needed (or at least desirable) API changes, in that new versions of methods can differ from their current ones without having to work out a deprecation path that allows new and old behavior to be supported by the same signature.
+- It gives us a clear boundary and deprecation point for other needed (or at least desirable) API changes, in that new versions of methods can differ from their current ones without having to work out a deprecation path that allows new and old behavior to be coexist in the same signature.
 
 In addition to moving convenience code out of `Registry` and into `Butler`, we'll also need to move our caching (of collections, dataset types, and certain dimension records) to the client, and it'll certainly be better to put that in one client class (i.e. `Butler`) that replicate it across both `Registry` client implementations.
 
+Batch operations and unifying bulk transfers
+--------------------------------------------
+
+The current Butler provides a `transaction` method that returns a context manager that attempts to guarantee consistency for all operations performed in that context.
+This only works rigorously for Registry operations at present, as the Datastore transaction system we have at present is not fault tolerant.
+Much of the rest of this proposal is motivated by trying to address this, but our current transaction interface is not really viable even for Registry-only operations when an http client/server implementation is required.
+
+Instead, the prototype includes a `RawBatch` class that represents a low-level serializable batch of multiple `Registry` operations to be performed together within one transaction, and a `Butler.batched` method and `BatchHelper` class to provide a high-level interface for constructing them.
+Unlike operations performed inside the current `Butler.transaction`, applying operations to `BatchHelper` does nothing until its context manager closes.
+
+`RawBatch` also turns out to be a very useful way to describe the transfer of content from one data repository to another, whether that's directly via `Butler.transfer_from` or with an export file/directory in between.
+The prototype includes another helper context manager (`ButlerExtractor`, which inherits from `LimitedButlerExtractor`) for constructing these batches, and a sketch for how they might be used to define a new more efficient (and less memory-constrained) export file format.
+The prototype's `Butler.export` and `Butler.transfer_from` both use the `ButlerExtractor`, unifying those interface.
+
+Opportunistic API changes
+-------------------------
+
+Moving methods from `Registry` to `Butler` will break existing code - eventually, once the removal of the `Registry` interface actually occurs.
+In the meantime, adding new methods to `Butler` gives us an opportunity to address existing issues and take advantage of new possibilities without introducing breakage.
+In addition to solving this problems, this can help ease migration to the new interfaces by giving users reasons to switch even before the `Registry` methods are deprecated.
+
+The prototype includes a few examples of this kind of opportunistic API change, including:
+
+- Our myriad methods for removing datasets and collections have been replaced by the extremely simple `Butler.unstore` method, the more powerful `Butler.removal` method, and the `RemovalHelper` class the latter returns.
+  This provides more direct control over and visibility into the relationships that would be broken by removals (CHAINED collection links, dataset associations with TAGGED and CALIBRATION collections).
+
+- The new relation-based query system can do already do some things our current query interfaces have no ways to express, and with a bit more work it could do more still.
+  At the same time, the current `Registry.queryDataIds` and `Registry.queryDimensionRecords` methods take ``datasets`` and ``collections`` arguments whose behavior has consistently been confusing to users (who should usually use `queryDatasets` instead).
+  The prototype proposes both a new power-user `Butler.query` method and more-or-less like-for-like replacements for our current methods, but the replacements for `queryDataIds` and `queryDimensionRecords` drop those arguments, since the subtle functionality they provided is now available via `Butler.query`.
+
+- `Registry.setCollectionChain` has been replaced by `Butler.edit_collection_chain`, which ports convenience functionality from our command-line scripts to the Python interface.
+
+.. _internal-interface-changes:
+
+Internal interface changes
+==========================
+
+.. note::
+   TODO
+
 QuantumDirectory
 ================
+
+.. note::
+   This section is still just bullet stubs for now.
 
 - If journal files point to QuantumGraphs sometimes, those QuantumGraphs should be considered part of the data repository.
 
