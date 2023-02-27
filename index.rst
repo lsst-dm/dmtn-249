@@ -100,10 +100,13 @@ This has two major advantages over our current ``put`` implementation:
 - for a client/server butler, there is little alternation between object-store and http operations, reducing latency (assuming the data ID has indeed been obtained in advance) and increasing the possibility that the client Datastore can just be a regular ``FileDatastore``.
   Any database transactions needed can also happen entirely in a single server operation.
 
-This change will make it so Datastore sees conflicting writes before Registry.
-While these are expected to be rare, and thus conflict resolution does not need to be highly optimized, is important that it does not have the potential to corrupt the repository.
-The easiest way to do this is to configure Datastore storage backends to prohibit writes to locations where files already exist; this is the default behavior for most backends of interest, but we currently explicitly permit silent clobbering to work around problems with automatic retries in BPS.
-:cite:`DMTN-205` outlines an alternative approach to automatric retries that is better for provenance and should be adopted instead.
+.. note::
+   Allowing Datastore to clobber whenever it writes is not safe under the new proposal, because Datastore will now see racing conflicting writes before Registry.
+   A POSIX-backed Datastore could handle these races by writing to a temporary random location and hard-linking into the final location, since hard-links are atomic and do not clobber by default.
+   Object-store Datastores do not have this option, and do not in general provide the kind of one-writer-succeeds behavior we'd need.
+   This is largely mitigated by the fact that QuantumGraph execution provides high-level management of possible races (as long as there is only one QuantumGraph for any RUN collection).
+   It could be further mitigated by including the UUID in the URI template, making it far less likely that the Datastore writes will clash; when the Registry transactions do clash, at most one will be committed (and associated with a valid Datastore write), while the others will roll back, leaving some Datastore-only datasets (which, again, are permitted albeit undesirable).
+   This leaves competing writes that also use the same UUID as a problem, but this is sufficiently difficult to do accidentally that I think we can just guard against it via documentation; the biggest concern is probably logic bugs in QuantumGraph execution (especially involving retries), not user code.
 
 ``Butler.import`` and ``Butler.transfer_from``
 """"""""""""""""""""""""""""""""""""""""""""""
@@ -152,9 +155,6 @@ Adding journal files
 The main flaw in the proposal above is that it can leave artifacts in the Datastore root that are untracked and hard to find, due to both I/O failures and abandoned batch runs.
 This is not a new flaw - it already a problem that we are very much subject to.
 These orphaned artifacts are a problem for two reasons: they waste space, and they block new Datastore writes to their locations.
-
-.. note::
-   Allowing Datastore to clobber whenever it writes is not safe under the new proposal, because Datastore will now see racing conflicting writes before Registry.
 
 To mitigate this, we propose using *journal files* - special files written to configured locations at the start of a Datastore write operation and deleted only when the operation completes successfully.
 These files would contain sufficient information to find all artifacts that might be present in the Datastore without any associated Registry content, allowing us to much more efficiently clean up after any failures.
