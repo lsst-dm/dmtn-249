@@ -10,14 +10,39 @@
 
    **This technote is a work-in-progress.**
 
-Abstract
-========
+Introduction
+============
 
 The current boundaries between the Butler and its Registry and Datastore components are under strain in a number of different ways.
 Failure recovery during deletion operations has long been in bad shape, and much of the current "trash"-based system is currently just unused complexity.
 Butler client/server will require new approaches to atomic operations and managing operation latency (including caching), and :jira:`RFC-888` has recently shown that we may want to move away from the Registry component providing public APIs even outside of the client/server.
-The provenance system proposed in :cite:`DMTN-205` can also impact these boundaries, especially if we want to extend its notion of QuantumGraph storage in data repositories to graphs that have not yet been fully executed; one possibility here is to add a third component that acts as a more graph-oriented Registry.
-This technote will propose a new high-level organization of Butler interfaces and responsibilities to address these concerns.
+This technical note will propose a new high-level organization of Butler interfaces and responsibilities to address these concerns.
+
+The most important changes proposed here are either wholly or largely invisible to users, but some major public interface changes are included as well (see :ref:`public-interface-changes`).
+Some of these are sufficiently disruptive that we imagine an extended transition period for them, such as adding new versions of interfaces well before the old ones are deprecated.
+Other major changes here may never happen as proposed, as our timeline for enacting them is sufficiently long that circumstances will have inevitably have changed at least somewhat by the time we get to them.
+In a few cases, we may decide that deprecating an old interface is never worthwhile even if it has been superseded.
+Regardless, any backwards-incompatible API changes proposed here will be RFC'd directly when we are ready to make them.
+This technote is not itself such a proposal; it should serve at most as reference/background material for future RFCs.
+This is especially true of the Python prototyping stubs present in the ``git`` repository for this technote (again discussed more fully in :ref:`public-interface-changes`).
+
+The upcoming client/server (also referred to as the "remote" or "http" butler or registry) work is the impetus for most of these changes, though many of the issues we are trying to solve are long-standing.
+It is certainly true that implementing a client/server butler naively without first addressing at least our existing consistency issues (see :ref:`consistency_across_registry_and_datastore`) would put it on a very uncertain foundation.
+By considering the client/server architecture in the design work to fix those issues - a huge contrast from when the current Registry and Datastore boundaries were defined - we also hope to make the development of the client/server butler much faster (after the proposed refactoring paves the way).
+
+This technote is very much organized sequentially - each section builds on the previous one.
+
+- In :ref:`consistency_across_registry_and_datastore`, we describe our current consistency problem and present an incomplete proposal to fix it, by clearly enumerating states that datasets are allowed to be in and reworking our internal interfaces accordingly.
+
+- In :ref:`adding_journal_files`, we extend the proposal to deal with its most important flaw (which is actually preexisting, in a slightly different form): datasets that are present only in the Datastore.
+
+- In :ref:`including-signed-urls-for-access-control` we amend the proposal to also handle access control problems in the client/server butler.
+
+- In :ref:`public-interface-changes` we discuss the public interface changes required, enabled, or otherwise related to this the proposal.
+
+- :ref:`implications_for_quantumgraph_generation_and_execution` is a stub that will be expanded in a future ticket.
+
+.. _consistency_across_registry_and_datastore:
 
 Consistency across Registry and Datastore
 =========================================
@@ -58,7 +83,11 @@ Instead, we would add a new method to get record schema information from a Datas
 We could use that information with the new ``daf_relation`` classes to easily integrate them with the query system, allowing user queries to not just test for Datastore existence, but query on and report Datastore specific-fields like file size.
 We'd also of course provide a way for users to inspect which such fields are available, since Datastore record fields can change from implementation to implementation.
 
-Datastore methods that add new datasets to the repository would be modified to return a collection of records describing those datasets, again for Butler to pass to Registry.
+Datastore methods that add new datasets to the repository could be modified to return a collection of records describing those datasets, again for Butler to pass to Registry.
+
+.. note::
+   Later, in :ref:`including-signed-urls-for-access-control`, we will actually propose that Datastore records should be created by a Registry call to a helper object passed to it by Butler, which obtains that helper from Datastore, but for the purposes of the discussion up to that point, this distinction is unimportant.
+
 Datastore methods that read datasets or interpret the records describing them would be modified to accept those records from Butler (which fetches them from Registry).
 Some Datastore existence-check methods would go away entirely (e.g. ``knows``), as their functionality is subsumed by Registry dataset queries, while others would change their behavior to checking for artifact existence *given* records.
 ``Registry.insertDatasets`` would be modified to accept datastore records for storage, and ``Registry.findDataset`` would be modified to return dataset records as well as a ``DatasetRef``.
@@ -207,11 +236,10 @@ Another alternative would be to have the server take responsibility for creating
 Which of these is preferable probably depends on whether we want these operations to block until completion and whether we have reasons to perform other Datastore operations on the server (up to this point, having the client use a vanilla ``FileDatastore`` and perform all Datastore operations still seems viable).
 
 .. note::
-   TODO: think about how all of this interacts with DECam raws.
-
-.. note::
-   TODO: think about how all of this affects disassembled composites.
-   Or get rid of them!  I am pretty confident now that we'll never need them, and dropping that before we embark on other major changes to Datastore seems wise (sorry, Tim).
+   This proposal should not affect our ability support disassembled composites, though we may be able to make further simplifications if we drop that support.
+   It may have implications for our ability to support multiple datasets in a single file, at least in terms of safeguarding against premature deletions
+   of those files.
+   An easy way to mitigate that would be to limit that support to "unmanaged" datasets that are ingested with absolute URIs, since those are never deleted by butler code, and this satisfies Rubin's only current use case (ingesting DECam raws) for this functionality.
 
 .. _including-signed-urls-for-access-control:
 
@@ -245,9 +273,11 @@ Public interface changes
 ========================
 
 This package's source repository includes a ``prototyping`` directory full of Python files (mostly just interface stubs) that attempt to work out the proposal in detail.
-This section and :ref:`internal-interface-changes` further motivate and describe that detailed proposal at a high level and occasionally include snippets from it, but it should be inspected directly to see the complete pictures.
+This section further motivate and describe that detailed proposal at a high level and occasionally include snippets from it, but it should be inspected directly to see the complete picture.
 The ``README.rst`` file in that directory includes important caveats that should be read first.
 The most important is that this is in many respects a "maximal" proposal or "vision document" - it represent an attempt to envision how future Butler, Registry, and Datastore interfaces would ideally look (including a full switch to ``snake_case`` naming), with the expectation that many of these changes will never come to pass.
+
+The changes summarized here are those that we believe are most important in a broad sense, though the details may change and in some cases we believe an unusually extended transition period (in which both old and new APIs are present) would make sense.
 
 Bundling Datastore records with DatasetRef
 ------------------------------------------
@@ -276,6 +306,8 @@ Moving all of the public `Registry` interface to `Butler` and making `Butler.reg
 - It gives us a clear boundary and deprecation point for other needed (or at least desirable) API changes, in that new versions of methods can differ from their current ones without having to work out a deprecation path that allows new and old behavior to be coexist in the same signature.
 
 In addition to moving convenience code out of `Registry` and into `Butler`, we'll also need to move our caching (of collections, dataset types, and certain dimension records) to the client, and it'll certainly be better to put that in one client class (i.e. `Butler`) that replicate it across both `Registry` client implementations.
+
+At some point, we may opt to continue backwards compatibility support for `Butler.registry` methods by making `Butler.registry` return a lightweight proxy that forwards back to `Butler` instead of a real `Registry` instance.
 
 Batch operations and unifying bulk transfers
 --------------------------------------------
@@ -309,24 +341,22 @@ The prototype includes a few examples of this kind of opportunistic API change, 
 
 - `Registry.setCollectionChain` has been replaced by `Butler.edit_collection_chain`, which ports convenience functionality from our command-line scripts to the Python interface.
 
-.. _internal-interface-changes:
+.. _implications_for_quantumgraph_generation_and_execution:
 
-Internal interface changes
-==========================
-
-.. note::
-   TODO
-
-QuantumDirectory
-================
+Implications for QuantumGraph generation and execution
+======================================================
 
 .. note::
-   This section is still just bullet stubs for now.
+   This section is a stub.  It may be expanded on a future ticket.
+
+- Attaching Datastore records to DatasetRef objects makes it more natural to for QuantumGraph to hold Datastore records, which it currently does for overall-inputs only, in separate per-quantum containers.
+  Including predicted Datastore records for intermediate and output datasets may also help with storage class conversions, by allowing us to also drop special mapping of dataset type definitions recently added on :jira:`DM-37995` - the key question is whether `Datastore` needs to know the Registry storage class for for a particular dataset type if it also has the `Datastore` records.
+  If it does not, then this may also open up a path to sidestepping storage class migration problems - the Registry storage class for a dataset type could become merely the default for when a storage class is not provided, as we'd always use Datastore records to identify what is on disk on a dataset-by-dataset basis.
 
 - If journal files point to QuantumGraphs sometimes, those QuantumGraphs should be considered part of the data repository.
+  This will require additional design work.
 
 - This naturally flows into having pipetask (or a replacement, so we can deprecate a lot of stuff at once instead of piecemeal) use QuantumBackedButler.
-
 
 .. Make in-text citations with: :cite:`bibkey`.
 .. Uncomment to use citations
