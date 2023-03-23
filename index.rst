@@ -67,7 +67,14 @@ I propose we adopt the following consistency principles instead.
 
 1. A dataset can be present in either Registry or Datastore without being present in the other.
 
-2. A dataset present in Datastore alone must have a data ID that is valid in the Registry for that data repository (i.e. it uses valid dimension values) and it must not have any Datastore records in the Registry database.
+2. A dataset present in Datastore alone must have a data ID that is valid in the Registry for that data repository (i.e. it uses valid dimension values) and it must not have any *Datastore records* in the Registry database.
+
+   .. note::
+      Datastore records are tabular data whose schema is largely set by a particular Datastore, with the only requirement being that the dataset UUID be a part of the primary key (in `FileDatastore`, the component is also part of the primary key, to support disassembly).
+      For `FileDatastore`, the datastore records hold the URIs for all files and the fully-qualified name of the formatter that should be used to read the dataset, along with additional metadata.
+      A datastore can have more than one record table.
+      Multiple datastores do not share a single record table, though this may be a `FileDatastore` limitation, not a general one, and we could probably relax this rule if a need arose.
+
    This state is expected to be transitory, either intentionally (e.g. during batch execution, before datasets are transferred back), or as a result of failures we cannot rigorously prevent.
    Datasets in this state as a result of failures or abandoned batch runs are considered undesirable but tolerable, and an approach to minimizing them will be introduced later in :ref:`adding_journal_files`.
 
