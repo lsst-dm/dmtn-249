@@ -9,7 +9,10 @@ way to `typing.NewType`, as these pretty much all need to be appear in
 public interfaces where the newtype would be a big hassle.
 """
 
+from collections.abc import Mapping
 from typing import Any, TypeAlias
+
+from lsst.resources import ResourcePath
 
 CollectionName: TypeAlias = str
 CollectionDocumentation: TypeAlias = str
@@ -25,6 +28,12 @@ OpaqueTableName: TypeAlias = str
 StorageClassName: TypeAlias = str
 FormatterName: TypeAlias = str
 
+
+JournalPathMap = Mapping[str, Mapping[str, ResourcePath]]
+"""A nested mapping indexed first by Datastore name, then RUN collection name,
+with signed-if-needed URLs for journal files that Datastore should create when
+starting a transaction and delete when a transaction finishes successfully.
+"""
 
 OpaqueTableValues = Any
 """Per-table, per-dataset opaque values.

@@ -3,10 +3,11 @@ from __future__ import annotations
 from abc import abstractmethod
 from collections.abc import Iterable
 
-from lsst.daf.butler import DatasetIdFactory, DimensionUniverse, StorageClassFactory
+from lsst.daf.butler import DatasetIdFactory, DimensionUniverse, FileDataset, StorageClassFactory
 from lsst.daf.butler.registry import RegistryDefaults
 from lsst.daf.butler.registry.wildcards import CollectionWildcard, DatasetTypeWildcard
 
+from .aliases import JournalPathMap
 from .bridge import DatastoreBridge
 from .primitives import DatasetRef
 from .queries import CollectionQuery, DatasetTypeQuery, Query
@@ -66,25 +67,45 @@ class Registry:
         self,
         refs: Iterable[DatasetRef],
         sign: bool,
-    ) -> Iterable[DatasetRef]:
+    ) -> tuple[Iterable[DatasetRef], JournalPathMap]:
         """Expand data IDs in datasets that are assumed not to exist in the
-        Registry.
+        Registry and attach new Datastore records for them.
 
         An expanded version of every given ref must be returned.  If one or
         more dataset refs already exist in the registry, the implementation may
         fail or ignore the fact that they exist.
+
+        This also returns a nested mapping containing signed journal-file URLs
+        for all datastore-RUN combinations needed; these will also be signed
+        if requested (and needed by the datastore).
         """
         raise NotImplementedError("Will delegate to self.query and self.datastore_bridge methods.")
+
+    def expand_new_file_datasets(
+        self,
+        file_datasets: Iterable[FileDataset],
+        sign: bool,
+    ) -> tuple[Iterable[FileDataset], JournalPathMap]:
+        """Unpack `FileDataset` instances, call `expand_new_dataset_refs` on
+        all embedded `DatasetRef` objects, and return updated `FileDataset`
+        objects.
+        """
+        # This is a client-side convenience method, not an abstract one.
+        raise NotImplementedError("TODO")
 
     @abstractmethod
     def expand_existing_dataset_refs(
         self, refs: Iterable[DatasetRef], sign_for_get: bool = False, sign_for_unstore: bool = False
-    ) -> Iterable[DatasetRef]:
+    ) -> tuple[Iterable[DatasetRef], JournalPathMap]:
         """Expand data IDs in datasets that are assumed to exist in the
-        Registry.
+        Registry and attach existing Datastore records for them.
 
         Datasets that do not actually exist in the Registry need not be
         returned, but implementations should trust already-expanded content in
         the given refs to avoid unnecessary queries.
+
+        This also returns a nested mapping containing signed journal-file URLs
+        for all datastore-RUN combinations needed; these will also be signed
+        if requested (and needed by the datastore).
         """
         raise NotImplementedError("Will delegate to self.query and self.datastore_bridge methods.")

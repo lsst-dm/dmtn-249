@@ -194,13 +194,13 @@ class Butler(DatastoreButler):
         for obj, ref in arg:
             objs_by_uuid[ref.uuid] = obj
             refs.append(ref)
-        expanded_refs = self._registry.expand_new_dataset_refs(refs, sign=True)
+        expanded_refs, journal_paths = self._registry.expand_new_dataset_refs(refs, sign=True)
         pairs = [(objs_by_uuid[ref.uuid], ref) for ref in expanded_refs]
         raw_batch = RawBatch()
         raw_batch.dataset_insertions.include(expanded_refs)
         # We can't delegate to super because we need to use the transactional
         # version of the Datastore API to ensure consistency via journal files.
-        with self._datastore.put_many_transaction(pairs) as opaque_table_rows:
+        with self._datastore.put_many_transaction(pairs, journal_paths) as opaque_table_rows:
             raw_batch.opaque_table_insertions.update(opaque_table_rows)
             self._registry.apply_batch(raw_batch)
         return raw_batch.opaque_table_insertions.attach_to(refs)
@@ -344,9 +344,9 @@ class Butler(DatastoreButler):
         # that this method still does Datastore-only removals, but here that
         # includes removing Datastore records from Registry.  See
         # BatchHelper.removal for dataset and collection removals.
-        refs = self._registry.expand_existing_dataset_refs(refs, sign_for_unstore=True)
+        refs, journal_paths = self._registry.expand_existing_dataset_refs(refs, sign_for_unstore=True)
         raw_batch = RawBatch()
-        with self._datastore.unstore_transaction(refs) as opaque_table_keys:
+        with self._datastore.unstore_transaction(refs, journal_paths) as opaque_table_keys:
             raw_batch.opaque_table_removals.update(opaque_table_keys)
             self._registry.apply_batch(raw_batch)
 
@@ -710,8 +710,10 @@ class Butler(DatastoreButler):
         ):
             if datastore_config is not None:
                 opaque_data = (datastore_config, raw_batch.opaque_table_insertions)
+            expanded_file_datasets, journal_paths = self._registry.expand_new_file_datasets(file_datasets)
             with self._datastore.receive(
-                {directory: file_datasets},
+                {directory: expanded_file_datasets},
+                journal_paths,
                 transfer=transfer,
                 record_validation_info=record_validation_info,
                 opaque_data=opaque_data,
@@ -785,8 +787,10 @@ class Butler(DatastoreButler):
         def on_commit(datastore_config: DatastoreConfig | None) -> None:
             if datastore_config is not None:
                 opaque_data = (datastore_config, raw_batch.opaque_table_insertions)
+            expanded_file_datasets, journal_paths = self._registry.expand_new_file_datasets(file_datasets)
             with self._datastore.receive(
-                file_datasets,
+                expanded_file_datasets,
+                journal_paths,
                 datastore_config,
                 opaque_data=opaque_data,
                 transfer=transfer,

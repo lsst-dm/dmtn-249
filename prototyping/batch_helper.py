@@ -262,12 +262,16 @@ class BatchHelper:
         call `ingest` downstream, and provide some utility code for making
         `FileDataset` instances with resolved refs if that's the case.
         """
-        self._raw_batch.dataset_insertions.include(itertools.chain.from_iterable(d.refs for d in datasets))
+        expanded_datasets, journal_paths = self._registry.expand_new_file_datasets(datasets)
+        self._raw_batch.dataset_insertions.include(
+            itertools.chain.from_iterable(d.refs for d in expanded_datasets)
+        )
         if directory is not None:
             directory = ResourcePath(directory)
         opaque_table_data = self._exit_stack.enter_context(
             self.butler._datastore.receive(
-                datasets,
+                expanded_datasets,
+                journal_paths,
                 transfer=transfer,
                 own_absolute=own_absolute,
                 directory=directory,

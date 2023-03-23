@@ -204,6 +204,10 @@ When the transfer job for that execution completes successfully, that journal fi
 
 Changing the journal file format should be considered a data repository migration, and all migrations should require that the data repository have no active journal files unless they are able to migrate those files as well.
 
+Journal files need to be readable and writeable in the same contexts that the Datastore itself is.
+This rules out storing them in client-side locations, but having Datastore client code write them to and read them from a remote object store is viable, and storing them inside the Datastore root itself is probably the simplest approach.
+If a Datastore server is present, it could take responsibility for writing them, and they could even be store in a database (though if they are stored in the Registry database, we need to be careful to resist the temptation to include them in Registry transactions when they should not be).
+
 Implementation of important butler operations
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -213,8 +217,6 @@ Implementation of important butler operations
 As before, but a journal file will be written (sometime) before the ``Datastore.put`` begins and deleted after the Registry operation succeeds.
 
 ``QuantumBackedButler`` will not write or delete journal files; it will rely entirely on a higher-level one for the full QuantumGraph.
-
-For a client/server Butler the journal creation and deletion could happen in the client or in the server, but the former continues to permit a regular ``FileDatastore`` to be used.
 
 ``Butler.import`` and ``Butler.transfer_from``
 """"""""""""""""""""""""""""""""""""""""""""""
@@ -232,8 +234,6 @@ No journaling is needed, as this is a read-only operation.
 The journal file should be written before the ``Registry`` transaction is committed and deleted only after all Datastore deletions succeed.
 This is slightly problematic for client/server, because the journal file will need to be populated with information we get from the Registry database; this means the client cannot be responsible for creating the journal file unless we make fetching the datastore records and deleting them separate operations.
 That isn't too bad - it's just a slight increase in latency and a bit more http traffic.
-Another alternative would be to have the server take responsibility for creating the journal file, and then either returning responsibility for its deletion to the client or taking responsibility for both the deletion of the Datastore artifacts and the deletion of the journal file.
-Which of these is preferable probably depends on whether we want these operations to block until completion and whether we have reasons to perform other Datastore operations on the server (up to this point, having the client use a vanilla ``FileDatastore`` and perform all Datastore operations still seems viable).
 
 .. note::
    This proposal should not affect our ability support disassembled composites, though we may be able to make further simplifications if we drop that support.
@@ -266,6 +266,28 @@ For `Butler.put`, it would be most efficient to have the Registry generate signe
 We also need to generate UUIDs for new datasets, and have thus far been vague about which component has that responsibility.
 Doing all of this in the Registry makes sense, which amounts to essentially making it *indirectly* responsible not just for storing Datastore records, but for creating at least the initial versions of them as well (including URI templates), by delegating that work to the same schema-definition objects it already receives from Datastore.
 This means a substantial fraction of a Datastore's logic will actually be executed on the server, as part of the the Registry, and that these schema-definition objects have hence really evolved into something more: they are the new Datastore-Registry "bridge" interface.
+
+Access control for journal files
+--------------------------------
+
+Journal files for Datastores with access controls will also need to take those controls into account.
+
+First, journal files *may* contain signed URLs, but they must include the UUID and any additional information needed to fully identify the artifact (e.g. the component).
+Unsigned URIs may be present but may not be directly usable.
+
+It is at least desirable for journal files written by one user to only reference datasets that are writeable by that user in the manner represented by that journal file, but this cannot be guaranteed if a client Datastore writes the journal file directly, even if it does so via a signed URLs.
+It may be acceptable to proceed with client-written remote journal files without this guarantee, because presence in a journal file is not on its own sufficient to cause a modification to any dataset.
+
+Having client code write journal files to a remote location would also require a signed URL for the journal file location.
+Given that dataset controls are mediated by collections, it would make sense for the client to obtain from the server one signed journal file URL for each RUN collection it wants to modify, and for the true locations of those files to be very clearly mapped to those RUN collections.
+This could be done at the same time the client requests records (and signed URLs) for the datasets themselves.
+Administrative code that cleans up journal files could then ignore (or complain about) any entries that correspond to datasets that are not in the corresponding RUN collection.
+
+This still seems to be the simplest approach, in that it keeps all I/O in the client, using signed URIs obtained from the server to perform remote operations.
+The alternative is to have a server API for writing and removing journal files.
+This might give us more flexibility in where the journal files are actually stored, as well as the ability to directly vet what goes into them.
+But it would another server API to maintain and another server call to make, and it might be a subtly difficult one to write, given that it is a core part of our error-handling.
+
 
 .. _public-interface-changes:
 

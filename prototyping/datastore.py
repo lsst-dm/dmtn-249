@@ -8,7 +8,7 @@ from typing import Any
 from lsst.daf.butler import DatasetRef, DatastoreConfig, FileDataset
 from lsst.resources import ResourcePath
 
-from .aliases import GetParameter, InMemoryDataset
+from .aliases import GetParameter, InMemoryDataset, JournalPathMap
 from .primitives import OpaqueTableBatch, OpaqueTableDefinition, OpaqueTableKeyBatch, OpaqueTableName
 
 
@@ -108,6 +108,7 @@ class Datastore(ABC):
     def put_many_transaction(
         self,
         arg: Iterable[tuple[InMemoryDataset, DatasetRef]],
+        journal_paths: JournalPathMap,
         /,
     ) -> AbstractContextManager[OpaqueTableBatch]:
         """Insert new datasets for in-memory objects within a journal-file
@@ -121,16 +122,16 @@ class Datastore(ABC):
         Notes
         -----
         Simply calling this method performs no write operations of any kind.
-        Implementations *may* check or otherwise process inputs at this time,
-        including contacting a server to obtain signed URLs.
+        Implementations *may* check or otherwise process inputs.
 
-        Entering the context manager first writes a journal file or otherwise
-        persists the list of datasets (at least UUIDs, generally a URI or other
-        storage-specific identifier as well) to a location that indicates that
-        a fallable write operation is underway involving these datasets.  It
-        then actually performs all writes, and finally returns iterables of
-        opaque table rows that must be inserted into the Registry before the
-        context exits.
+        Entering the context manager first writes a journal file (to
+        ``journal_url``, which will be a signed URL if one is needed for this
+        datastore) or otherwise persists the list of datasets (at least UUIDs,
+        generally a URI or other storage-specific identifier as well) to a
+        location that indicates that a fallable write operation is underway
+        involving these datasets.  It then actually performs all writes, and
+        finally returns iterables of opaque table rows that must be inserted
+        into the Registry before the context exits.
 
         When the context manager exists without an error, the journal file (or
         equivalent) is deleted.
@@ -151,7 +152,9 @@ class Datastore(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def unstore_transaction(self, refs: Iterable[DatasetRef]) -> AbstractContextManager[OpaqueTableKeyBatch]:
+    def unstore_transaction(
+        self, refs: Iterable[DatasetRef], journal_paths: JournalPathMap
+    ) -> AbstractContextManager[OpaqueTableKeyBatch]:
         """Remove datasets within a journal-file transaction.
 
         Notes
