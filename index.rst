@@ -256,11 +256,13 @@ Access to the associated files managed by a Datastore is mediated by signed URLs
 A seemingly natural place to include URL-signing in this proposal is inside the Datastore implementation, since only the Datastore knows where any URLs might exist in the opaque-to-Registry records it uses, and only the Datastore ever uses and kind of URLs.
 This approach has two major drawbacks, however:
 
-- It requires the Datastore to have a server component; in every other respect we can abstract the differences between a SQL-backed full Butler and a client/server full Butler via a different Registry implementation (see :ref:`public-interface-changes`).
+- It requires the Datastore to have its own server (as opposed to some logic that can be run on the client or on the server depending on the butler configuration); in every other respect we can abstract the differences between a SQL-backed full Butler and a client/server full Butler via a different Registry implementation (see :ref:`public-interface-changes`).
 
-- Because the information used to determine whether a URL *should* be signed lives in the Registry, a Datastore server cannot easily perform this job.
-  It cannot trust information provided to it via the `DatasetRef` and opaque table records passed to it from Butler in terms of access control, since those come from a public http interface; instead it'd have to use a Registry of its own to re-obtain Datastore records and collection information for each UUID it is passed in order to determine whether to sign URLs embedded in the records.
-  This is a potential efficiency concern, and while we could probably use caching to mitigate that, caching often increases complexity is subtle ways.
+- Because the information used to determine whether a URL *should* be signed lives in the Registry, a Datastore server cannot perform this job on its own.
+  In order to trust information provided to it via the `DatasetRef` and opaque table records passed to it from Butler in terms of access control, the `DatasetRef` would need to be signed by the Registry, using a secret shared by the Registry and Datastore servers.
+  While we could add that kind of signing logic, it would leave the Datastore server with little to do, at least in the usual case where Registry access to the `DatasetRef` implies Datastore access to the referred-to dataset: it'd just verify the `DatasetRef` signature and sign the URLs, returning them to the client.
+  Requiring a server round-trip just to do that seems wasteful.
+  Even if the access control model does distinguish between access to the dataset and access to its metadata, it doesn't make sense to have a Datastore server just to manage access control lookups for the former when Registry is already doing lookups for the latter.
 
 Our alternative proposal here is to instead make Registry responsible for signing URLs, using a small piece of server-side Datastore-provided logic to interpret the opaque records just enough for it to perform this job.
 Registry already needs to be told about the schemas of the of the opaque tables enough to create SQL tables, insert rows into them, and query for those rows, and that information can only come from Datastore, so it's a small leap from that to also having Datastore tell Registry (in these schema-definition objects) where to find URLs that must be signed.
