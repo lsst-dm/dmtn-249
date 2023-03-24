@@ -183,6 +183,7 @@ class Datastore(ABC):
     def receive(
         self,
         file_datasets: Mapping[ResourcePath | None, list[FileDataset]],
+        journal_paths: JournalPathMap,
         *,
         transfer: str | None = "auto",
         own_absolute: bool = False,
@@ -203,6 +204,9 @@ class Datastore(ABC):
             completes).  `None` may be used as a key if all nested files have
             absolute URIs; these files should be treated the same as absolute
             URIs under a root URI key.
+        journal_paths
+            Mapping of signed-if-needed journal file URLs, indexed by datastore
+            name and RUN collection.
         transfer, optional
             Transfer mode recognized by `ResourcePath`.  If `None`, the
             datastore should not assume ownership of the files unless a
