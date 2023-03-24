@@ -133,7 +133,8 @@ This has two major advantages over our current ``put`` implementation:
 
 - there is no database transaction over the Datastore write, keeping transactions small and reducing contention for database connections;
 
-- for a client/server butler, there is little alternation between object-store and http operations, reducing latency (assuming the data ID has indeed been obtained in advance) and increasing the possibility that the client Datastore can just be a regular ``FileDatastore``.
+- for a client/server butler, there is little alternation between object-store and http operations, as we bundle more operations into fewer server calls.
+  This reduces latency (assuming the data ID has indeed been obtained in advance) and increases the possibility that the client Datastore can just be a regular ``FileDatastore``.
   Any database transactions needed can also happen entirely in a single server operation.
 
 .. note::
@@ -267,7 +268,7 @@ This approach has two major drawbacks, however:
 Our alternative proposal here is to instead make Registry responsible for signing URLs, using a small piece of server-side Datastore-provided logic to interpret the opaque records just enough for it to perform this job.
 Registry already needs to be told about the schemas of the of the opaque tables enough to create SQL tables, insert rows into them, and query for those rows, and that information can only come from Datastore, so it's a small leap from that to also having Datastore tell Registry (in these schema-definition objects) where to find URLs that must be signed.
 
-This is most straightforward for read and deletion operations, for which unsigned URLs are already stored in opaque tables in the Registry database, and we can transform them into signed URLs before we send them back to Butler client for use.
+This is most straightforward for read and deletion operations, for which unsigned URLs are already stored in opaque tables in the Registry database, and we can transform them into signed URLs before we send them back to the Butler client for use.
 
 For `Butler.put`, it would be most efficient to have the Registry generate signed URLs at the same time it expands data IDs for (potential) use in URI templates, since both of these need to be done on the server.
 We also need to generate UUIDs for new datasets, and have thus far been vague about which component has that responsibility.
