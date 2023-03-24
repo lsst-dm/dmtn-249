@@ -140,9 +140,7 @@ This has two major advantages over our current ``put`` implementation:
    Allowing Datastore to clobber whenever it writes is not safe under the new proposal, because Datastore will now see racing conflicting writes before Registry.
    A POSIX-backed Datastore could handle these races by writing to a temporary random location and hard-linking into the final location, since hard-links are atomic and do not clobber by default.
    Object-store Datastores do not have this option, and do not in general provide the kind of one-writer-succeeds behavior we'd need.
-   This is largely mitigated by the fact that QuantumGraph execution provides high-level management of possible races (as long as there is only one QuantumGraph for any RUN collection).
-   It could be further mitigated by including the UUID in the URI template, making it far less likely that the Datastore writes will clash; when the Registry transactions do clash, at most one will be committed (and associated with a valid Datastore write), while the others will roll back, leaving some Datastore-only datasets (which, again, are permitted albeit undesirable).
-   This leaves competing writes that also use the same UUID as a problem, but this is sufficiently difficult to do accidentally that I think we can just guard against it via documentation; the biggest concern is probably logic bugs in QuantumGraph execution (especially involving retries), not user code.
+   This is largely mitigated by the fact that QuantumGraph execution provides high-level management of possible races (as long as there is only one QuantumGraph for any RUN collection), but it does leave us uncomfortably dependent on those tools to avoid corruption.
 
 ``Butler.import`` and ``Butler.transfer_from``
 """"""""""""""""""""""""""""""""""""""""""""""
