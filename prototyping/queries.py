@@ -12,8 +12,6 @@ from lsst.daf.butler import (
     CollectionType,
     DataCoordinate,
     DataId,
-    DatasetRef,
-    DatasetType,
     DimensionRecord,
     StorageClass,
 )
@@ -27,7 +25,7 @@ from .aliases import (
     DimensionElementName,
     DimensionName,
 )
-from .primitives import DimensionGroup
+from .primitives import DimensionGroup, DatasetType, DatasetRef
 
 
 class OverlapJoinPolicy(enum.Enum):

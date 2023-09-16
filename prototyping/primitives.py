@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
 
 class SequenceEditMode(enum.Enum):
+    """Enum for edit operations on sequences."""
+
     ASSIGN = enum.auto()
     REMOVE = enum.auto()
     EXTEND = enum.auto()
@@ -28,12 +30,16 @@ class SequenceEditMode(enum.Enum):
 
 
 class SetInsertMode(enum.Enum):
+    """Enum for insert operations on sets."""
+
     INSERT_OR_FAIL = enum.auto()
     INSERT_OR_SKIP = enum.auto()
     INSERT_OR_REPLACE = enum.auto()
 
 
 class SetEditMode(enum.Enum):
+    """Enum for edit operations on sets."""
+
     INSERT_OR_FAIL = SetInsertMode.INSERT_OR_FAIL
     INSERT_OR_SKIP = SetInsertMode.INSERT_OR_SKIP
     INSERT_OR_REPLACE = SetInsertMode.INSERT_OR_REPLACE

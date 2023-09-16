@@ -4,11 +4,10 @@ import dataclasses
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
-from lsst.daf.butler import DatasetRef
-
 if TYPE_CHECKING:
-    from .aliases import CollectionName
+    from .aliases import CollectionName, JournalPathMap
     from .butler import Butler
+    from .primitives import DatasetRef
 
 
 @dataclasses.dataclass
@@ -70,8 +69,10 @@ class RemovalHelper:
     This is populated by by `incldue_collections` if ``find_orphaned=True``.
     """
 
+    _journal_uris: JournalPathMap = dataclasses.field(default_factory=dict)
+
     def include_datasets(self, refs: Iterable[DatasetRef], find_associations_in: Any = ()) -> None:
-        """Include datasets in the set to be deleted while optoonally looking
+        """Include datasets in the set to be deleted while optionally looking
         for dangling associations.
         """
         raise NotImplementedError()

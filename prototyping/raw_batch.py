@@ -48,6 +48,7 @@ class DatasetTypeRegistration:
             set(dataset_type.dimensions),
             dataset_type.storage_class_name,
             dataset_type.is_calibration,
+            update=update,
         )
 
     def add_to(self, raw_batch: RawBatch) -> None:

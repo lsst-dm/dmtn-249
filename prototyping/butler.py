@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
 from contextlib import AbstractContextManager, ExitStack, contextmanager
-from typing import Any, overload
+from typing import Any, cast, overload
 
 from lsst.daf.butler import (
     CollectionType,
@@ -133,10 +133,10 @@ class Butler(DatastoreButler):
         self,
         config: Config | ResourcePathExpression | None = None,
         *,
-        butler: Butler = None,
+        butler: Butler | None = None,
         collections: CollectionPattern = None,
-        run: CollectionName = None,
-        search_paths: list[ResourcePathExpression] = None,
+        run: CollectionName | None = None,
+        search_paths: list[ResourcePathExpression] | None = None,
         writeable: bool | None = None,
         infer_defaults: bool = True,
         **kwargs: DataIdValue,
@@ -213,7 +213,8 @@ class Butler(DatastoreButler):
         datastore records for intermediates as well as inputs.
         """
         # Not sure we care one way or another about signing here.
-        return self._registry.expand_new_dataset_refs(refs, sign=True)
+        refs, _ = self._registry.expand_new_dataset_refs(refs, sign=True)
+        return refs
 
     @overload
     def get(
@@ -249,7 +250,7 @@ class Butler(DatastoreButler):
 
     def get_many(
         self,
-        arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
+        arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any]]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], InMemoryDataset]]:
         # Signature is inherited, but here it accepts not-expanded refs.
@@ -258,8 +259,8 @@ class Butler(DatastoreButler):
         for ref, parameters_for_ref in arg:
             parameters.append(parameters_for_ref)
             refs.append(ref)
-        refs = list(self._registry.expand_existing_dataset_refs(refs, sign_for_get=True))
-        return super().get_many(zip(refs, parameters))
+        expanded_refs, _ = self._registry.expand_existing_dataset_refs(refs, sign_for_get=True)
+        return super().get_many(zip(list(expanded_refs), parameters))
 
     @overload
     def get_deferred(
@@ -296,7 +297,7 @@ class Butler(DatastoreButler):
 
     def get_many_deferred(
         self,
-        arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
+        arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any]]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], DeferredDatasetHandle]]:
         # Signature is inherited, but here it accepts not-expanded refs.
@@ -305,7 +306,7 @@ class Butler(DatastoreButler):
         for ref, parameters_for_ref in arg:
             parameters.append(parameters_for_ref)
             refs.append(ref)
-        refs = list(self._registry.expand_existing_dataset_refs(refs, sign_for_get=True))
+        expanded_refs, _ = self._registry.expand_existing_dataset_refs(refs, sign_for_get=True)
         return super().get_many_deferred(zip(refs, parameters))
 
     @overload
@@ -337,7 +338,8 @@ class Butler(DatastoreButler):
     def get_many_uris(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
         # Signature is inherited, but here it accepts not-expanded refs.
         # Do we want signed URIs here?  Should that be an option for the user?
-        return super().get_many_uris(self._registry.expand_existing_dataset_refs(refs))
+        refs, _ = self._registry.expand_existing_dataset_refs(refs)
+        return super().get_many_uris(refs)
 
     def unstore(self, refs: Iterable[DatasetRef]) -> None:
         # Signature is inherited, but here it accepts not-expanded refs.  Note
@@ -434,7 +436,9 @@ class Butler(DatastoreButler):
         timespan: Timespan | None,
         **kwargs: DataIdValue,
     ) -> DatasetRef:
-        """The `resolve_dataset` method is the new `Registry.findDataset`, as
+        """Resolve data IDs and dataset types into DatasetRefs.
+
+        The `resolve_dataset` method is the new `Registry.findDataset`, as
         well as the entry point for all of the Butler logic that interprets
         non-standard data IDs (e.g. day_obs + seq_num).
 
@@ -452,12 +456,13 @@ class Butler(DatastoreButler):
         raise NotImplementedError("Will delegate to self.query()")
 
     def expand_data_id(self, data_id: DataId, dimensions: Iterable[str], **kwargs: Any) -> DataCoordinate:
-        """Like the current Registry.expandDataId.
+        """Add dimension records to data IDs.
 
         That means it's still a really bad idea to call this on lots of data
         IDs in a loop rather than using something vectorized, but I think the
         single-data ID expansion use case is important enough that we need to
-        keep it."""
+        keep it.
+        """
         raise NotImplementedError("Will delegate to self.query()")
 
     def query_collections(
@@ -587,7 +592,7 @@ class Butler(DatastoreButler):
 
     def get_collection_chain(self, chain_name: CollectionName) -> Sequence[CollectionName]:
         """Like the current Registry.getCollectionChain."""
-        for _, collection_type, _, children in self.query().collections(chain_name).details():
+        for _, collection_type, _, children in self.query_collections(chain_name).details():
             if children is None:
                 raise CollectionTypeError(
                     f"Collection {chain_name!r} has type {collection_type}, not CHAINED."
@@ -597,13 +602,13 @@ class Butler(DatastoreButler):
 
     def get_collection_documentation(self, name: CollectionName) -> CollectionDocumentation:
         """Like the current Registry.getCollectionDocumentation."""
-        for _, _, docs, _ in self.query().collections(name).details():
+        for _, _, docs, _ in self.query_collections(name).details():
             return docs
         raise MissingCollectionError(f"Collection {name!r} not found.")
 
     def get_dataset_type(self, name: str) -> DatasetType:
         """Like the current Registry.getDatasetType."""
-        for dataset_type in self.query().dataset_types(name):
+        for dataset_type in self.query_dataset_types(name).values():
             return dataset_type
         raise MissingDatasetTypeError(f"Dataset type {name!r} does not exist.")
 
@@ -616,10 +621,10 @@ class Butler(DatastoreButler):
     def _make_extractor(
         self,
         raw_batch: RawBatch,
-        file_datasets: dict[ResourcePath, list[FileDataset]],
+        file_datasets: dict[ResourcePath | None, list[FileDataset]],
         on_commit: Callable[[DatastoreConfig | None], None],
         *,
-        directory: ResourcePath | None,
+        directory: ResourcePath | None = None,
         transfer: str | None = None,
         include_datastore_records: bool = True,
     ) -> ButlerExtractor:
@@ -636,20 +641,23 @@ class Butler(DatastoreButler):
 
     def export(
         self,
+        directory: ResourcePathExpression | None = None,
         filename: ResourcePathExpression | None = None,
         *,
         transfer: str | None = None,
-        directory: ResourcePathExpression | None = None,
         include_datastore_records: bool = True,
     ) -> AbstractContextManager[ButlerExtractor]:
         # Override exists just to declare more-derived return type;
         # DatastoreButler.export does all the real work, in part by delegating
         # back to `_make_extractor`.
-        return super().export(
-            directory=directory,
-            filename=filename,
-            transfer=transfer,
-            include_datastore_records=include_datastore_records,
+        return cast(
+            AbstractContextManager[ButlerExtractor],
+            super().export(
+                directory=directory,
+                filename=filename,
+                transfer=transfer,
+                include_datastore_records=include_datastore_records,
+            ),
         )
 
     def import_(
@@ -696,12 +704,16 @@ class Butler(DatastoreButler):
         extent/header, and when no filename is given we try the default
         filenames for all supported formats in 'directory'.
         """
-
         if directory is not None:
-            directory = ResourcePath(directory)
-
-        # TODO: process 'filename' with directory (try abs/relative, different
-        # extensions, etc) until we find something that exists.
+            directory = ResourcePath(directory, forceDirectory=True)
+            if filename is not None:
+                filename = directory.join(cast(str, filename))
+            else:
+                filename = directory.join("export.json")
+        elif filename is None:
+            raise ValueError("'filename' or 'directory' is required")
+        else:
+            filename = ResourcePath(filename)
 
         # Iterate over batches and tell Datastore and Registry to handle them.
         # See RawBatch.read_export_file and RawBatchExport for details.
@@ -710,9 +722,11 @@ class Butler(DatastoreButler):
         ):
             if datastore_config is not None:
                 opaque_data = (datastore_config, raw_batch.opaque_table_insertions)
-            expanded_file_datasets, journal_paths = self._registry.expand_new_file_datasets(file_datasets)
+            expanded_file_datasets, journal_paths = self._registry.expand_new_file_datasets(
+                file_datasets, sign=True
+            )
             with self._datastore.receive(
-                {directory: expanded_file_datasets},
+                {directory: list(expanded_file_datasets)},
                 journal_paths,
                 transfer=transfer,
                 record_validation_info=record_validation_info,
@@ -725,7 +739,6 @@ class Butler(DatastoreButler):
     def transfer_from(
         self,
         source_butler: Butler,
-        source_refs: Iterable[DatasetRef],
         transfer: str = "auto",
         record_validation_info: bool = True,
     ) -> AbstractContextManager[ButlerExtractor]:
@@ -743,13 +756,13 @@ class Butler(DatastoreButler):
         # LimitedButlerExtractor.
         ...
 
-    @contextmanager
+    @contextmanager  # type: ignore
     def transfer_from(
         self,
         source_butler: LimitedButler,
         transfer: str = "auto",
         record_validation_info: bool = True,
-    ) -> Iterator[LimitedButlerExtractor]:
+    ) -> Iterator[LimitedButlerExtractor | ButlerExtractor]:
         """Transfer content from one data repository to another, or from a
         staging area (e.g. QuantumGraph execution results) to the repository
         proper.
@@ -781,35 +794,7 @@ class Butler(DatastoreButler):
         once (extending up to the full graph, which might be more useful for
         other things).
         """
-        raw_batch = RawBatch()
-        file_datasets: list[FileDataset] = []
-
-        def on_commit(datastore_config: DatastoreConfig | None) -> None:
-            if datastore_config is not None:
-                opaque_data = (datastore_config, raw_batch.opaque_table_insertions)
-            expanded_file_datasets, journal_paths = self._registry.expand_new_file_datasets(file_datasets)
-            with self._datastore.receive(
-                expanded_file_datasets,
-                journal_paths,
-                datastore_config,
-                opaque_data=opaque_data,
-                transfer=transfer,
-                record_validation_info=record_validation_info,
-            ) as opaque_table_rows:
-                raw_batch.opaque_table_insertions = opaque_table_rows
-                self._registry.apply_batch(raw_batch)
-            raw_batch.clear()
-            file_datasets.clear()
-
-        extractor = source_butler._make_extractor(
-            raw_batch,
-            file_datasets,
-            on_commit,
-            transfer=None,  # receiving butler will transfer.
-        )
-        del on_commit
-        yield extractor
-        extractor.commit()
+        raise NotImplementedError()
 
     ###########################################################################
     #
@@ -890,7 +875,8 @@ class Butler(DatastoreButler):
     @contextmanager
     def removal(self) -> Iterator[RemovalHelper]:
         with self.batched() as batch:
-            yield batch.removal()
+            with batch.removal() as removal:
+                yield removal
 
     def register_dataset_type(
         self,
@@ -930,4 +916,4 @@ class Butler(DatastoreButler):
         record_validation_info: bool = True,
     ) -> None:
         with self.batched() as batch:
-            batch.ingest(*datasets, transfer, record_validation_info)
+            batch.ingest(*datasets, transfer=transfer, record_validation_info=record_validation_info)

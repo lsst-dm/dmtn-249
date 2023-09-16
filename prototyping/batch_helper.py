@@ -3,7 +3,7 @@ from __future__ import annotations
 import itertools
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from lsst.daf.butler import CollectionType, DataId, DimensionRecord, FileDataset, StorageClass, Timespan
 from lsst.resources import ResourcePath, ResourcePathExpression
@@ -19,6 +19,7 @@ from .aliases import (
 from .primitives import DatasetRef, DatasetType
 from .raw_batch import (
     ChainedCollectionEdit,
+    CollectionRegistration,
     DatasetTypeRegistration,
     RawBatch,
     SequenceEditMode,
@@ -78,7 +79,7 @@ class BatchHelper:
         it's easier to drop the separate current `registerRun` method in favor
         of just this.
         """
-        self._raw_batch.collection_registrations.append((name, type, doc))
+        self._raw_batch.collection_registrations[name] = CollectionRegistration(name, type, doc)
 
     def edit_collection_chain(
         self,
@@ -88,8 +89,10 @@ class BatchHelper:
         *,
         flatten: bool = False,
     ) -> None:
-        """A replacement for `Registry.setCollectionChain` that picks up the
-        mode-setting conveniences from the ``butler collection-chain` CLI.
+        """Modify the definition of a CHAINED collection.
+
+        This is a replacement for `Registry.setCollectionChain` that picks up
+        the mode-setting conveniences from the ``butler collection-chain` CLI.
         """
         self._raw_batch.collection_edits.append(
             ChainedCollectionEdit(chain_name, list(children), mode, flatten)
@@ -109,7 +112,7 @@ class BatchHelper:
         resolution options.
         """
         uuids = {ref.uuid for ref in refs}
-        self._raw_batch.collection_edits.extend(TaggedCollectionEdit(collection, uuids, mode))
+        self._raw_batch.collection_edits.append(TaggedCollectionEdit(collection, uuids, mode))
 
     def certify(self, collection: CollectionName, refs: Iterable[DatasetRef], timespan: Timespan) -> None:
         """Like the current `Registry.certify`."""
@@ -151,7 +154,7 @@ class BatchHelper:
 
         This method is for fully removing ("purging") datasets and collections.
         To remove datasets from storage while retaining their metadata, use
-        `unstore` instad.
+        `unstore` instead.
 
         Returns
         -------
@@ -167,13 +170,13 @@ class BatchHelper:
             self._raw_batch.collection_removals.update(helper.collections)
             for chain_name, children in helper.chain_links.items():
                 if chain_name not in self._raw_batch.collection_removals:
-                    self.edit_collection_chain(chain_name, children, SequenceEditMode.REMOVE)
+                    self.edit_collection_chain(chain_name, list(children), SequenceEditMode.REMOVE)
             for collection, refs in helper.associations.items():
                 self.edit_associations(collection, refs, SetEditMode.REMOVE)
             opaque_table_uuids = self._exit_stack.enter_context(
-                self.butler._datastore.unstore_transaction(helper.datasets)
+                self.butler._datastore.unstore_transaction(helper.datasets, helper._journal_uris)
             )
-            self._raw_batch.opaque_table_removals.include(opaque_table_uuids)
+            self._raw_batch.opaque_table_removals.update(opaque_table_uuids)
 
     def register_dataset_type(
         self,
@@ -253,7 +256,7 @@ class BatchHelper:
         own_absolute: bool = False,
         record_validation_info: bool = True,
     ) -> None:
-        """Replacement for `Butler.ingest`.
+        """Ingest external datasets.
 
         This signature is different here largely because of RFC-888 - if
         DatasetRefs are always require, then the RUN collection and dataset ID
@@ -262,19 +265,18 @@ class BatchHelper:
         call `ingest` downstream, and provide some utility code for making
         `FileDataset` instances with resolved refs if that's the case.
         """
-        expanded_datasets, journal_paths = self._registry.expand_new_file_datasets(datasets)
+        expanded_datasets, journal_paths = self.butler._registry.expand_new_file_datasets(datasets, sign=True)
         self._raw_batch.dataset_insertions.include(
-            itertools.chain.from_iterable(d.refs for d in expanded_datasets)
+            itertools.chain.from_iterable(cast(Iterable[DatasetRef], d.refs) for d in expanded_datasets)
         )
         if directory is not None:
             directory = ResourcePath(directory)
         opaque_table_data = self._exit_stack.enter_context(
             self.butler._datastore.receive(
-                expanded_datasets,
+                {directory: list(expanded_datasets)},
                 journal_paths,
                 transfer=transfer,
                 own_absolute=own_absolute,
-                directory=directory,
                 record_validation_info=record_validation_info,
             )
         )

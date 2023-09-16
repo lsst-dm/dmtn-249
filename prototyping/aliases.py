@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """A collection of aliases for `str` and `Any` that make type annotations
 more readable.
 
@@ -8,6 +6,8 @@ file isn't to propose that, and I am definitely not in favor of going all the
 way to `typing.NewType`, as these pretty much all need to be appear in
 public interfaces where the newtype would be a big hassle.
 """
+
+from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any, TypeAlias

@@ -5,11 +5,15 @@ from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
 from typing import Any
 
-from lsst.daf.butler import DatasetRef, DatastoreConfig, FileDataset
+from lsst.daf.butler import DatastoreConfig, FileDataset
 from lsst.resources import ResourcePath
 
 from .aliases import GetParameter, InMemoryDataset, JournalPathMap
-from .primitives import OpaqueTableBatch, OpaqueTableDefinition, OpaqueTableKeyBatch, OpaqueTableName
+from .primitives import (
+    DatasetRef,
+    OpaqueTableBatch,
+    OpaqueTableKeyBatch,
+)
 
 
 class Datastore(ABC):
@@ -36,12 +40,6 @@ class Datastore(ABC):
     """
 
     config: DatastoreConfig
-
-    @property
-    @abstractmethod
-    def opaque_table_definitions(self) -> Mapping[OpaqueTableName, OpaqueTableDefinition]:
-        """The definitions of the opaque tables used by this Datastore."""
-        raise NotImplementedError()
 
     @abstractmethod
     def get_many(
@@ -246,7 +244,7 @@ class Datastore(ABC):
         transfer: str | None = "auto",
         directory: ResourcePath | None = None,
         return_records: bool = True,
-    ) -> tuple[OpaqueTableBatch | None, dict[Mapping[ResourcePath | None, list[FileDataset]]]]:
+    ) -> tuple[OpaqueTableBatch | None, Mapping[ResourcePath | None, list[FileDataset]]]:
         """Export datasets and Datastore metadata.
 
         Parameters

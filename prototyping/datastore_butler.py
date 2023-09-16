@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import itertools
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
-from typing import Any
+from contextlib import contextmanager, AbstractContextManager
+from typing import Any, cast
 
 from lsst.daf.butler import DeferredDatasetHandle, DimensionUniverse, FileDataset
 from lsst.resources import ResourcePath, ResourcePathExpression
@@ -48,14 +49,14 @@ class DatastoreButler(LimitedButler):
 
     def get_many(
         self,
-        arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
+        arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any]]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], InMemoryDataset]]:
         return self._datastore.get_many(arg)
 
     def get_many_deferred(
         self,
-        arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
+        arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any]]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], DeferredDatasetHandle]]:
         return [
@@ -63,7 +64,11 @@ class DatastoreButler(LimitedButler):
             # expanded DatasetRefs that hold all datastore records,
             # DeferredDatasetHandle only needs to hold a Datastore instead of a
             # Butler.
-            (ref, parameters_for_ref, DeferredDatasetHandle(self._datastore, ref, parameters_for_ref))
+            (
+                ref,
+                parameters_for_ref,
+                DeferredDatasetHandle(self._datastore, ref, parameters_for_ref),  # type: ignore
+            )
             for ref, parameters_for_ref in arg
         ]
 
@@ -88,7 +93,7 @@ class DatastoreButler(LimitedButler):
     def _make_extractor(
         self,
         raw_batch: RawBatch,
-        file_datasets: dict[ResourcePath, list[FileDataset]],
+        file_datasets: dict[ResourcePath | None, list[FileDataset]],
         on_commit: Callable[[DatastoreConfig | None], None],
         *,
         directory: ResourcePath | None = None,
@@ -105,7 +110,6 @@ class DatastoreButler(LimitedButler):
             include_datastore_records=include_datastore_records,
         )
 
-    @contextmanager
     def export(
         self,
         directory: ResourcePathExpression | None = None,
@@ -113,35 +117,44 @@ class DatastoreButler(LimitedButler):
         *,
         transfer: str | None = None,
         include_datastore_records: bool = True,
-    ) -> Iterator[DatastoreButlerExtractor]:
+    ) -> AbstractContextManager[DatastoreButlerExtractor]:
         if directory is not None:
-            directory = ResourcePath(directory)
+            directory = ResourcePath(directory, forceDirectory=True)
+            if filename is not None:
+                filename = directory.join(cast(str, filename))
+            else:
+                filename = directory.join("export.json")
+        elif filename is None:
+            raise ValueError("'filename' or 'directory' is required")
+        else:
+            filename = ResourcePath(filename)
 
-        # TODO: process 'filename' with directory to handle relative paths,
-        # extensions.  Reject .yaml in favor of whatever our new extension is;
-        # if necessary we could add a ``legacy: bool = False`` kwarg to keep
-        # support writing YAML for a bit, but I'd like to drop writing (but
-        # keep reading) as soon as an alternative exists.
+        @contextmanager
+        def cm() -> Iterator[DatastoreButlerExtractor]:
+            raw_batch = RawBatch()
+            file_datasets: dict[ResourcePath | None, list[FileDataset]] = {}
 
-        raw_batch = RawBatch()
-        file_datasets: dict[ResourcePath, FileDataset] = {}
+            def on_commit(datastore_config: DatastoreConfig | None) -> None:
+                raw_batch.write_export_file(
+                    filename, datastore_config, itertools.chain.from_iterable(file_datasets.values())
+                )
+                raw_batch.clear()
+                file_datasets.clear()
 
-        def on_commit(datastore_config: DatastoreConfig | None) -> None:
-            raw_batch.write_export_file(filename, datastore_config, file_datasets)
-            raw_batch.clear()
-            file_datasets.clear()
+            extractor = self._make_extractor(
+                raw_batch,
+                file_datasets,
+                on_commit,
+                directory=directory,
+                transfer=transfer,
+                include_datastore_records=include_datastore_records,
+            )
 
-        extractor = self._make_extractor(
-            raw_batch,
-            file_datasets,
-            on_commit,
-            directory=directory,
-            transfer=transfer,
-            include_datastore_records=include_datastore_records,
-        )
-        yield extractor
-        del on_commit
-        extractor.commit()
+            yield extractor
+            del on_commit
+            extractor.commit()
+
+        return cm()
 
 
 class DatastoreButlerExtractor(LimitedButlerExtractor):
@@ -153,7 +166,7 @@ class DatastoreButlerExtractor(LimitedButlerExtractor):
         self,
         butler: DatastoreButler,
         raw_batch: RawBatch,
-        file_datasets: dict[ResourcePath, list[FileDataset]],
+        file_datasets: dict[ResourcePath | None, list[FileDataset]],
         on_commit: Callable[[DatastoreConfig | None], None],
         directory: ResourcePath | None,
         transfer: str | None,

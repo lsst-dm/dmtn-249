@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
-from lsst.daf.butler import DataCoordinate, DatasetRef, DimensionRecord, FileDataset
+from lsst.daf.butler import DataCoordinate, DimensionRecord, FileDataset
 from lsst.resources import ResourcePath
 
 from .aliases import CollectionName, DimensionElementName
 from .datastore_butler import DatastoreButlerExtractor
-from .primitives import SetInsertMode
+from .datastore import DatastoreConfig
+from .primitives import SetInsertMode, DatasetRef
 from .raw_batch import RawBatch
 
 if TYPE_CHECKING:
@@ -25,15 +26,22 @@ class ButlerExtractor(DatastoreButlerExtractor):
     def __init__(
         self,
         butler: Butler,
+        raw_batch: RawBatch,
+        file_datasets: dict[ResourcePath | None, list[FileDataset]],
+        on_commit: Callable[[DatastoreConfig | None], None],
         directory: ResourcePath | None,
         transfer: str | None,
-        raw_batch: RawBatch,
-        file_datasets: list[FileDataset],
         include_datastore_records: bool,
     ):
         self.butler: Butler
         super().__init__(
-            self, butler, directory, transfer, raw_batch, file_datasets, include_datastore_records
+            butler,
+            directory=directory,
+            transfer=transfer,
+            raw_batch=raw_batch,
+            file_datasets=file_datasets,
+            include_datastore_records=include_datastore_records,
+            on_commit=on_commit,
         )
 
     def include_datasets(
@@ -45,8 +53,9 @@ class ButlerExtractor(DatastoreButlerExtractor):
     ) -> None:
         # Docs inherited; only change is that this overload does not require
         # fully-expanded DatasetRefs.
+        refs, _ = self.butler._registry.expand_existing_dataset_refs(refs)
         super().include_datasets(
-            self.butler._expand_existing_dataset_refs(refs),
+            refs,
             include_types=include_types,
             include_dimensions=include_dimensions,
             include_run_collections=include_run_collections,

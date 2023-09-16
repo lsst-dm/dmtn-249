@@ -6,7 +6,7 @@ from contextlib import AbstractContextManager
 from typing import Any
 
 from lsst.daf.butler import DeferredDatasetHandle, DimensionUniverse, FileDataset
-from lsst.resources import ResourcePath
+from lsst.resources import ResourcePath, ResourcePathExpression
 
 from .aliases import GetParameter, InMemoryDataset
 from .datastore import DatastoreConfig
@@ -99,13 +99,13 @@ class LimitedButler(ABC):
         `DatasetRef` to be fully expanded (though they will have to be
         resolved, since all DatasetRefs will be after RFC-888).
         """
-        ((_, _, result),) = self.get_many([(ref, parameters)])
+        ((_, _, result),) = self.get_many([(ref, parameters if parameters is not None else {})])
         return result
 
     @abstractmethod
     def get_many(
         self,
-        arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
+        arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any]]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], InMemoryDataset]]:
         """Vectorized implementation of `get`."""
@@ -126,13 +126,13 @@ class LimitedButler(ABC):
         `DatasetRef` to be fully expanded (though they will have to be
         resolved, since all DatasetRefs will be after RFC-888).
         """
-        ((_, _, handle),) = self.get_many_deferred([(ref, parameters)])
+        ((_, _, handle),) = self.get_many_deferred([(ref, parameters if parameters is not None else {})])
         return handle
 
     @abstractmethod
     def get_many_deferred(
         self,
-        arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any] | None]],
+        arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any]]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], DeferredDatasetHandle]]:
         """Vectorized implementation of `get_deferred`."""
@@ -205,13 +205,13 @@ class LimitedButler(ABC):
     def _make_extractor(
         self,
         raw_batch: RawBatch,
-        file_datasets: dict[ResourcePath, list[FileDataset]],
+        file_datasets: dict[ResourcePath | None, list[FileDataset]],
         on_commit: Callable[[DatastoreConfig | None], None],
         *,
         transfer: str | None = None,
         directory: ResourcePath | None = None,
     ) -> LimitedButlerExtractor:
-        """Return a helper object that prodies an interface for transferring
+        """Return a helper object that provides an interface for transferring
         content out of this butler.
 
         This is a package-private method for use by other Butler objects and
@@ -262,26 +262,28 @@ class LimitedButler(ABC):
     @abstractmethod
     def export(
         self,
-        filename: ResourcePath,
+        directory: ResourcePathExpression | None = None,
+        filename: ResourcePathExpression | None = None,
         *,
         transfer: str | None = None,
-        directory: ResourcePath | None,
+        include_datastore_records: bool = True,
     ) -> AbstractContextManager[LimitedButlerExtractor]:
         """Export content from this data repository to a metadata file and
         optional directory of dataset files.
 
         Parameters
         ----------
-        filename
-            URI for the metadata file that allows the exported content to be
-            imported into another data repository.
-        transfer, optional
-            Transfer mode recognized by `ResourcePath`.
         directory, optional
             Root URI for exported datasets after the transfer.  Ignored if
             ``transfer`` is `None`.  Must be provided if ``transfer`` is not
             `None` unless all exported files have absolute URIs within the
             Datastore already.
+        filename
+            URI for the metadata file that allows the exported content to be
+            imported into another data repository.
+        transfer, optional
+            Transfer mode recognized by `ResourcePath`.
+        TODO
 
         Returns
         -------
