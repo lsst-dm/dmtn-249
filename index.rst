@@ -78,11 +78,11 @@ I propose we adopt the following consistency principles instead.
    This state is expected to be transitory, either intentionally (e.g. during batch execution, before datasets are transferred back), or as a result of failures we cannot rigorously prevent.
    Datasets in this state as a result of failures or abandoned batch runs are considered undesirable but tolerable, and an approach to minimizing them will be introduced later in :ref:`adding_journal_files`.
 
-2. When a dataset is present in both Registry and Datastore, the Registry is fully responsible for storage of Datastore records.
+3. When a dataset is present in both Registry and Datastore, the Registry is fully responsible for storage of Datastore records.
    Transferring records may be mediated by Butler or via some other direct Registry-Datastore interface (see :ref:`including-signed-urls-for-access-control`).
    Datasets in this state must always have Datastore records present in the registry, even if the Datastore otherwise has no need for records; this allows a database query to reliably return only datasets that actually exist in a Datastore via a join against the record tables.
 
-3. A dataset present in Registry alone must have no Datastore records.
+4. A dataset present in Registry alone must have no Datastore records.
    This is expected to be a long-term state for datasets that were temporary intermediates during processing that nevertheless need to be present in the Registry for provenance recording.
 
 This would allow us to completely remove the ``DatastoreRegistryBridge`` interface and the ``dataset_location`` and ``dataset_location_trash`` tables it manages.
