@@ -1,5 +1,7 @@
 :tocdepth: 1
 
+.. py:currentmodule:: lsst.daf.butler
+
 .. sectnum::
 
 .. Metadata such as the title, authors, and description are set in metadata.yaml
@@ -64,10 +66,10 @@ I propose we adopt the following consistency principles instead.
 2. A dataset present in Datastore alone must have a data ID that is valid in the Registry for that data repository (i.e. it uses valid dimension values) and it must not have any *Datastore records* in the Registry database.
 
    .. note::
-      Datastore records are tabular data whose schema is largely set by a particular Datastore, with the only requirement being that the dataset UUID be a part of the primary key (in `FileDatastore`, the component is also part of the primary key, to support disassembly).
-      For `FileDatastore`, the datastore records hold the URIs for all files and the fully-qualified name of the formatter that should be used to read the dataset, along with additional metadata.
+      Datastore records are tabular data whose schema is largely set by a particular Datastore, with the only requirement being that the dataset UUID be a part of the primary key (in :class:`~datastores.fileDatastore.FileDatastore`, the component is also part of the primary key, to support disassembly).
+      For :class:`~datastores.fileDatastore.FileDatastore`, the datastore records hold the URIs for all files and the fully-qualified name of the formatter that should be used to read the dataset, along with additional metadata.
       A datastore can have more than one record table.
-      Multiple datastores do not share a single record table, though this may be a `FileDatastore` limitation, not a general one, and we could probably relax this rule if a need arose.
+      Multiple datastores do not share a single record table, though this may be a :class:`~datastores.fileDatastore.FileDatastore` limitation, not a general one, and we could probably relax this rule if a need arose.
 
    This state is expected to be transitory, either intentionally (e.g. during batch execution, before datasets are transferred back), or as a result of failures we cannot rigorously prevent.
    Datasets in this state as a result of failures or abandoned batch runs are considered undesirable but tolerable, and an approach to minimizing them will be introduced later in :ref:`adding_journal_files`.
@@ -79,7 +81,7 @@ I propose we adopt the following consistency principles instead.
 4. A dataset present in Registry alone must have no Datastore records.
    This is expected to be a long-term state for datasets that were temporary intermediates during processing that nevertheless need to be present in the Registry for provenance recording.
 
-This would allow us to completely remove the ``DatastoreRegistryBridge`` interface and the ``dataset_location`` and ``dataset_location_trash`` tables it manages.
+This would allow us to completely remove the :class:`~registry.interfaces.DatastoreRegistryBridge` interface and the ``dataset_location`` and ``dataset_location_trash`` tables it manages.
 Instead, we would add a new method to get record schema information from a Datastore instance (which Butler would pass to Registry when repositories are created), which would always be required to include a dataset UUID column.
 We could use that information with the new ``daf_relation`` classes to easily integrate them with the query system, allowing user queries to not just test for Datastore existence, but query on and report Datastore specific-fields like file size.
 We'd also of course provide a way for users to inspect which such fields are available, since Datastore record fields can change from implementation to implementation.
@@ -90,14 +92,14 @@ Datastore methods that add new datasets to the repository could be modified to r
    Later, in :ref:`including-signed-urls-for-access-control`, we will actually propose that Datastore records should be created by a Registry call to a helper object passed to it by Butler, which obtains that helper from Datastore, but for the purposes of the discussion up to that point, this distinction is unimportant.
 
 Datastore methods that read datasets or interpret the records describing them would be modified to accept those records from Butler (which fetches them from Registry).
-Some Datastore existence-check methods would go away entirely (e.g. ``knows``), as their functionality is subsumed by Registry dataset queries, while others would change their behavior to checking for artifact existence *given* records.
-``Registry.insertDatasets`` would be modified to accept datastore records for storage, and ``Registry.findDataset`` would be modified to return dataset records as well as a ``DatasetRef``.
+Some Datastore existence-check methods would go away entirely (e.g. :meth:`Datastore.knows`), as their functionality is subsumed by Registry dataset queries, while others would change their behavior to checking for artifact existence *given* records.
+:meth:`~registry.Registry.insertDatasets` would be modified to accept datastore records for storage, and :meth:`~Registry.findDataset` would be modified to return dataset records as well as a :class:`DatasetRef`.
 
 .. note::
-   All ``DatasetRef`` objects in this technote are assumed to be resolved; unresolved ``DatasetRef`` objects are already slated to go away per :jira:`RFC-888`.
+   All :class:`DatasetRef` objects in this technote are assumed to be resolved; unresolved :class:`DatasetRef` objects are already slated to go away per :jira:`RFC-888`.
 
 This proposal formalizes what we are already doing during no-database batch execution, while taking advantage of new developments - UUIDs and ``daf_relation`` - to simplify the Registry/Datastore boundary.
-It would involve considerable code changes, but more removals than additions, and the vast majority of these would be behind the scenes or of minimal impact to users (e.g. ``Butler.datastore`` and ``Registry.insertDatasets`` are not formally private, but they should be, and are already widely recognized as for internal use only).
+It would involve considerable code changes, but more removals than additions, and the vast majority of these would be behind the scenes or of minimal impact to users (e.g. :attr:`Butler.datastore` and :attr:`Registry.insertDatasets` are not formally private, but they should be, and are already widely recognized as for internal use only).
 
 Implementation of important butler operations
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -111,24 +113,24 @@ Note that later sections in this technical note will expand upon these and ultim
 1. Obtain a valid expanded data ID from the Registry.
    In the vast majority of cases (i.e. QuantumGraph execution) this is done well in advance of the actual ``put`` call.
 
-2. Construct a ``DatasetRef`` by generating an appropriate UUID and using an existing or soon-to-exist RUN name.
+2. Construct a :class:`DatasetRef` by generating an appropriate UUID and using an existing or soon-to-exist RUN name.
    This will also typically occur well before the rest of the ``put``, as part of QuantumGraph generation.
 
-3. Perform the ``Datastore.put`` operation, writing the file artifacts associated with the dataset and returning records to the Butler.
+3. Perform the :meth:`Datastore.put` operation, writing the file artifacts associated with the dataset and returning records to the Butler.
    Datastore can be expected to make this operation atomic, either because it is naturally atomic for its storage backing or via writing a temporary and moving it.
    We do have to accept the possibility of failures leaving partially-written temporary files around.
 
-4. If the butler has a Registry, either held directly (as in a "full butler" today) or as a client of a butler server, call ``Registry.insertDatasets`` with both the ``DatasetRef`` and the records returned by the Datastore.
+4. If the butler has a Registry, either held directly (as in a "full butler" today) or as a client of a butler server, call :meth:`Registry.insertDatasets` with both the :class:`DatasetRef` and the records returned by the Datastore.
    Database transactions can be used to ensure that all tables in the Registry (including those for datastore records) are updated consistently or left unchanged.
-   If this operation fails, or the butler does not have a Registry (e.g. ``QuantumBackedButler``), the dataset is left in a valid state: it is in the Datastore, but not the Registry.
+   If this operation fails, or the butler does not have a Registry (e.g. :class:`QuantumBackedButler`), the dataset is left in a valid state: it is in the Datastore, but not the Registry.
    This must happen before the database changes are committed.
 
-This has two major advantages over our current ``put`` implementation:
+This has two major advantages over our current :meth:`~Butler.put` implementation:
 
 - there is no database transaction over the Datastore write, keeping transactions small and reducing contention for database connections;
 
 - for a client/server butler, there is little alternation between object-store and http operations, as we bundle more operations into fewer server calls.
-  This reduces latency (assuming the data ID has indeed been obtained in advance) and increases the possibility that the client Datastore can just be a regular ``FileDatastore``.
+  This reduces latency (assuming the data ID has indeed been obtained in advance) and increases the possibility that the client Datastore can just be a regular :class:`~datastores.fileDatastore.FileDatastore`.
   Any database transactions needed can also happen entirely in a single server operation.
 
 .. note::
@@ -137,12 +139,12 @@ This has two major advantages over our current ``put`` implementation:
    Object-store Datastores do not have this option, and do not in general provide the kind of one-writer-succeeds behavior we'd need.
    This is largely mitigated by the fact that QuantumGraph execution provides high-level management of possible races (as long as there is only one QuantumGraph for any RUN collection), but it does leave us uncomfortably dependent on those tools to avoid corruption.
 
-``Butler.import`` and ``Butler.transfer_from``
-""""""""""""""""""""""""""""""""""""""""""""""
+``Butler.import_`` and ``Butler.transfer_from``
+"""""""""""""""""""""""""""""""""""""""""""""""
 
-These operations would behave like vectorized versions of ``Butler.put``, with all Datastore writes (if nontrivial transfers are required) occurring before a single Registry or butler server operation that (within a transaction) adds datasets and the associated datastore records to the database.
+These operations would behave like vectorized versions of :meth:`Butler.put`, with all Datastore writes (if nontrivial transfers are required) occurring before a single Registry or butler server operation that (within a transaction) adds datasets and the associated datastore records to the database.
 
-For ``Butler.import``, however, we also need to add dimension data, and register collections and dataset types, and not all of these can be performed in transactions.
+For :meth:`Butler.import_`, however, we also need to add dimension data, and register collections and dataset types, and not all of these can be performed in transactions.
 These are already idempotent operations, which already allows users to retry a failed import without concern that the previous one will get in the way, and that's what's most important here.
 
 These operations have a greater chance than a single ``put`` of leaving us with Datastore-only files due to failures, since either a late Datastore copy or link failure or a Registry failure will leave all previous Datastore copy or link successes in place.
@@ -150,21 +152,21 @@ These operations have a greater chance than a single ``put`` of leaving us with 
 ``Butler.get``
 """"""""""""""
 
-1. If given a data ID, dataset type name, and collection search path instead of a ``DatasetRef``, obtain both the ``DatasetRef`` and all related datastore records from the database in a single Registry or butler server call.
-   If given a ``DatasetRef``, use this to obtain the datastore records. again via a single Registry or a butler server call.
-   ``QuantumBackedButler`` will look up datastore records directly in the quantum.
+1. If given a data ID, dataset type name, and collection search path instead of a :class:`DatasetRef`, obtain both the :class:`DatasetRef` and all related datastore records from the database in a single Registry or butler server call.
+   If given a :class:`DatasetRef`, use this to obtain the datastore records. again via a single Registry or a butler server call.
+   :class:`QuantumBackedButler` will look up datastore records directly in the quantum.
 
-2. Call ``Datastore.get`` with both the resolved ``DatasetRef`` and the bundle of records, returning the result to the caller.
+2. Call :meth:`Datastore.get` with both the resolved :class:`DatasetRef` and the bundle of records, returning the result to the caller.
 
-Because this is a read-only operation, consistency in the presence of failures is not a concern, but this still has a major advantage over the current approach for client-server in particular, as it bundles all http server access into a single call, followed by a direct object-store call, reducing latency and again allowing the Datastore to be a regular ``FileDatastore``.
+Because this is a read-only operation, consistency in the presence of failures is not a concern, but this still has a major advantage over the current approach for client-server in particular, as it bundles all http server access into a single call, followed by a direct object-store call, reducing latency and again allowing the Datastore to be a regular :class:`~datastores.fileDatastore.FileDatastore`.
 
 ``Butler.unstore``
 """"""""""""""""""
 
-This is a proposed new interface for removing multiple datasets from the Datastore without removing them from the Registry - one part of a replacement for ``Butler.pruneDatasets``, and part of a reimplementation for ``Butler.removeRuns``.
+This is a proposed new interface for removing multiple datasets from the Datastore without removing them from the Registry - one part of a replacement for :meth:`Butler.pruneDatasets`, and part of a reimplementation for :meth:`Butler.removeRuns`.
 
-1. Pass the inputs to Registry and/or butler server to obtain ``DatasetRefs`` and datastore records, instructing it to delete those records at the same time.
-   ``QuantumBackedButler`` may not need to implement this operation at all, but if it does (e.g. for clobbering), it already has everything it needs in the quantum.
+1. Pass the inputs to Registry and/or butler server to obtain :class:`DatasetRef` objects and datastore records, instructing it to delete those records at the same time.
+   :class:`QuantumBackedButler` may not need to implement this operation at all, but if it does (e.g. for clobbering), it already has everything it needs in the quantum.
    Deletion in the Registry can be made consistent via transactions, and in the client/server these can be started and committed entirely in the server.
 
 2. Pass the records to the Datastore and tell it to delete those artifacts.
@@ -187,7 +189,7 @@ These orphaned artifacts are a problem for two reasons: they waste space, and th
 
 To mitigate this, we propose using *journal files* - special files written to configured locations at the start of a Datastore write operation and deleted only when the operation completes successfully.
 These files would contain sufficient information to find all artifacts that might be present in the Datastore without any associated Registry content, allowing us to much more efficiently clean up after any failures.
-Interpreting the content in those files must not require any Registry queries, which for ``FileDatastore`` usually means the URI must be included, though predicting a URI from information that is stored is also permitted.
+Interpreting the content in those files must not require any Registry queries, which for :class:`~datastores.fileDatastore.FileDatastore` usually means the URI must be included, though predicting a URI from information that is stored is also permitted.
 Journal files may (and often will) list datasets that do not exist anywhere (e.g. were deleted successfully, or were never written), and will need to be compared to actual filesystem or object store artifact existence to be used.
 
 All journal files should start with a timestamp and include random characters in their filenames (only the directories that might contain these files are configured and static) to avoid clashes.
@@ -199,7 +201,7 @@ A SQL-backed Datastore that transforms in-memory datasets fully into Datastore r
 
 One unique and particularly important type of journal file is one that signals an ongoing QuantumGraph execution that has not yet been transferred back.
 This could be a pointer to the QuantumGraph file or even the QuantumGraph file itself, since a QuantumGraph already carries all the information needed to find all datasets that may have been written and not transferred back as part of its execution.
-This will be discussed in greater detail in a later section; for now the important criteria is that at the start of any QuantumGraph execution with ``QuantumBackedButler`` (I'm assuming Execution Butler will not exist soon) we will create a journal file that either is the QuantumGraph, points to the QuantumGraph, or contains a list of all datasets the QuantumGraph's execution might produce.
+This will be discussed in greater detail in a later section; for now the important criteria is that at the start of any QuantumGraph execution with :class:`QuantumBackedButler` (I'm assuming Execution Butler will not exist soon) we will create a journal file that either is the QuantumGraph, points to the QuantumGraph, or contains a list of all datasets the QuantumGraph's execution might produce.
 When the transfer job for that execution completes successfully, that journal file is removed.
 
 Changing the journal file format should be considered a data repository migration, and all migrations should require that the data repository have no active journal files unless they are able to migrate those files as well.
@@ -214,12 +216,12 @@ Implementation of important butler operations
 ``Butler.put``
 """"""""""""""
 
-As before, but a journal file will be written (sometime) before the ``Datastore.put`` begins and deleted after the Registry operation succeeds.
+As before, but a journal file will be written (sometime) before the :meth:`Datastore.put` begins and deleted after the Registry operation succeeds.
 
-``QuantumBackedButler`` will not write or delete journal files; it will rely entirely on a higher-level one for the full QuantumGraph.
+:class:`QuantumBackedButler` will not write or delete journal files; it will rely entirely on a higher-level one for the full QuantumGraph.
 
-``Butler.import`` and ``Butler.transfer_from``
-""""""""""""""""""""""""""""""""""""""""""""""
+``Butler.import_`` and ``Butler.transfer_from``
+"""""""""""""""""""""""""""""""""""""""""""""""
 
 As with ``put``, we would write a journal file before the Datastore operations begin and delete it after Registry writes succeed.
 
@@ -231,7 +233,7 @@ No journaling is needed, as this is a read-only operation.
 ``Butler.unstore`` and other removals
 """""""""""""""""""""""""""""""""""""
 
-The journal file should be written before the ``Registry`` transaction is committed and deleted only after all Datastore deletions succeed.
+The journal file should be written before the :class:`Registry` transaction is committed and deleted only after all Datastore deletions succeed.
 This is slightly problematic for client/server, because the journal file will need to be populated with information we get from the Registry database; this means the client cannot be responsible for creating the journal file unless we make fetching the datastore records and deleting them separate operations.
 That isn't too bad - it's just a slight increase in latency and a bit more http traffic.
 
@@ -254,8 +256,8 @@ This approach has two major drawbacks, however:
 - It requires the Datastore to have its own server (as opposed to some logic that can be run on the client or on the server depending on the butler configuration); in every other respect we can abstract the differences between a SQL-backed full Butler and a client/server full Butler via a different Registry implementation (see :ref:`public-interface-changes`).
 
 - Because the information used to determine whether a URL *should* be signed lives in the Registry, a Datastore server cannot perform this job on its own.
-  In order to trust information provided to it via the `DatasetRef` and opaque table records passed to it from Butler in terms of access control, the `DatasetRef` would need to be signed by the Registry, using a secret shared by the Registry and Datastore servers.
-  While we could add that kind of signing logic, it would leave the Datastore server with little to do, at least in the usual case where Registry access to the `DatasetRef` implies Datastore access to the referred-to dataset: it'd just verify the `DatasetRef` signature and sign the URLs, returning them to the client.
+  In order to trust information provided to it via the :class:`DatasetRef` and opaque table records passed to it from Butler in terms of access control, the :class:`DatasetRef` would need to be signed by the Registry, using a secret shared by the Registry and Datastore servers.
+  While we could add that kind of signing logic, it would leave the Datastore server with little to do, at least in the usual case where Registry access to the :class:`DatasetRef` implies Datastore access to the referred-to dataset: it'd just verify the :class:`DatasetRef` signature and sign the URLs, returning them to the client.
   Requiring a server round-trip just to do that seems wasteful.
   Even if the access control model does distinguish between access to the dataset and access to its metadata, it doesn't make sense to have a Datastore server just to manage access control lookups for the former when Registry is already doing lookups for the latter.
 
@@ -264,7 +266,7 @@ Registry already needs to be told about the schemas of the of the opaque tables 
 
 This is most straightforward for read and deletion operations, for which unsigned URLs are already stored in opaque tables in the Registry database, and we can transform them into signed URLs before we send them back to the Butler client for use.
 
-For `Butler.put`, it would be most efficient to have the Registry generate signed URLs at the same time it expands data IDs for (potential) use in URI templates, since both of these need to be done on the server.
+For :meth:`Butler.put`, it would be most efficient to have the Registry generate signed URLs at the same time it expands data IDs for (potential) use in URI templates, since both of these need to be done on the server.
 We also need to generate UUIDs for new datasets, and have thus far been vague about which component has that responsibility.
 Doing all of this in the Registry makes sense, which amounts to essentially making it *indirectly* responsible not just for storing Datastore records, but for creating at least the initial versions of them as well (including URI templates), by delegating that work to the same schema-definition objects it already receives from Datastore.
 This means a substantial fraction of a Datastore's logic will actually be executed on the server, as part of the the Registry, and that these schema-definition objects have hence really evolved into something more: they are the new Datastore-Registry "bridge" interface.
@@ -306,14 +308,14 @@ The changes summarized here are those that we believe are most important in a br
 Bundling Datastore records with DatasetRef
 ------------------------------------------
 
-The proposed changes to how datastore records are handled means that we will be passing `DatasetRef` instances and their associated datastore records to datastore together, essentially all of the time.
-But obtaining a `DatasetRef` from the the Registry is not just something done by Butler code; it's also something users do directly via query methods.
+The proposed changes to how datastore records are handled means that we will be passing :class:`DatasetRef` instances and their associated datastore records to datastore together, essentially all of the time.
+But obtaining a :class:`DatasetRef` from the the Registry is not just something done by Butler code; it's also something users do directly via query methods.
 
-This suggests that we should attach those datastore records to the `DatasetRef` objects themselves, both to simplify the signatures of methods that accept or return them together, and to allow the queries used to obtain a `DatasetRef` to provide everything needed to actually retrieve the associated dataset.
+This suggests that we should attach those datastore records to the :class:`DatasetRef` objects themselves, both to simplify the signatures of methods that accept or return them together, and to allow the queries used to obtain a :class:`DatasetRef` to provide everything needed to actually retrieve the associated dataset.
 
-This constitutes a new definition of an "expanded" `DatasetRef`: one that holds not just an expanded data ID, but a bundle of datastore records as well.
+This constitutes a new definition of an "expanded" :class:`DatasetRef`: one that holds not just an expanded data ID, but a bundle of datastore records as well.
 
-Combined with the conclusion of :ref:`including-signed-urls-for-access-control`, this means we'd be returning signed URLs in the `DatasetRef` objects returned by query methods.
+Combined with the conclusion of :ref:`including-signed-urls-for-access-control`, this means we'd be returning signed URLs in the :class:`DatasetRef` objects returned by query methods.
 This is mostly a good thing - it makes those refs usable for reading datasets directly and it completely avoids redundant registry lookups in usual workflows.
 But it does increase the duration we'd want a typical signed URI to be valid for - instead of the time it takes to do a single operation, it'd be more like the time it takes the results of a query in one cell of a notebook to be used in another cell.
 While that's arbitrarily long in general, I don't think it's unreasonable to either tell users that refs will get stale after a while, or just add timestamps to signed URIs so we can spot them and refresh them as necessary when ``get`` is called.
@@ -321,49 +323,49 @@ While that's arbitrarily long in general, I don't think it's unreasonable to eit
 Butler methods vs. Butler.registry methods
 ------------------------------------------
 
-One outcome of :jira:`RFC-888` was that users disliked having to remember which aspects of the butler public interface were on the `Butler` class vs. the `Registry` it holds.
-It's also confusing that `Butler.registry` and `Butler.datastore` both appear to be public attributes, but only the former really is (and some of its methods are not really intended for external use, either).
-Moving all of the public `Registry` interface to `Butler` and making `Butler.registry` (and `Butler.datastore`) private would be a major change, but it's the kind of change that would also help us with other changes:
+One outcome of :jira:`RFC-888` was that users disliked having to remember which aspects of the butler public interface were on the :class:`Butler` class vs. the :class:`Registry` it holds.
+It's also confusing that :attr:`Butler.registry` and :attr:`Butler.datastore` both appear to be public attributes, but only the former really is (and some of its methods are not really intended for external use, either).
+Moving all of the public :class:`Registry` interface to :class:`Butler` and making :attr:`Butler.registry` (and :attr:`Butler.datastore`) private would be a major change, but it's the kind of change that would also help us with other changes:
 
-- It lets us repurpose `Registry` as an internal polymorphic interface focused on abstracting over the differences between a direct SQL backend and an http backend, while leaving common user-focused client code to `Butler`.
+- It lets us repurpose :class:`Registry` as an internal polymorphic interface focused on abstracting over the differences between a direct SQL backend and an http backend, while leaving common user-focused client code to :class:`Butler`.
 
 - It gives us a clear boundary and deprecation point for other needed (or at least desirable) API changes, in that new versions of methods can differ from their current ones without having to work out a deprecation path that allows new and old behavior to be coexist in the same signature.
 
-In addition to moving convenience code out of `Registry` and into `Butler`, we'll also need to move our caching (of collections, dataset types, and certain dimension records) to the client, and it'll certainly be better to put that in one client class (i.e. `Butler`) that replicate it across both `Registry` client implementations.
+In addition to moving convenience code out of :class:`Registry` and into :class:`Butler`, we'll also need to move our caching (of collections, dataset types, and certain dimension records) to the client, and it'll certainly be better to put that in one client class (i.e. :class:`Butler`) that replicate it across both :class:`Registry` client implementations.
 
-At some point, we may opt to continue backwards compatibility support for `Butler.registry` methods by making `Butler.registry` return a lightweight proxy that forwards back to `Butler` instead of a real `Registry` instance.
+At some point, we may opt to continue backwards compatibility support for :attr:`Butler.registry` methods by making :attr:`Butler.registry` return a lightweight proxy that forwards back to :class:`Butler` instead of a real :class:`Registry` instance.
 
 Batch operations and unifying bulk transfers
 --------------------------------------------
 
-The current Butler provides a `transaction` method that returns a context manager that attempts to guarantee consistency for all operations performed in that context.
+The current Butler provides a :meth:`~Butler.transaction` method that returns a context manager that attempts to guarantee consistency for all operations performed in that context.
 This only works rigorously for Registry operations at present, as the Datastore transaction system we have at present is not fault tolerant.
 Much of the rest of this proposal is motivated by trying to address this, but our current transaction interface is not really viable even for Registry-only operations when an http client/server implementation is required.
 
-Instead, the prototype includes a `RawBatch` class that represents a low-level serializable batch of multiple `Registry` operations to be performed together within one transaction, and a `Butler.batched` method and `BatchHelper` class to provide a high-level interface for constructing them.
-Unlike operations performed inside the current `Butler.transaction`, applying operations to `BatchHelper` does nothing until its context manager closes.
+Instead, the prototype includes a ``RawBatch`` class that represents a low-level serializable batch of multiple :class:`Registry` operations to be performed together within one transaction, and a ``Butler.batched`` method and ``BatchHelper`` class to provide a high-level interface for constructing them.
+Unlike operations performed inside the current :meth:`Butler.transaction`, applying operations to ``BatchHelper`` does nothing until its context manager closes.
 
-`RawBatch` also turns out to be a very useful way to describe the transfer of content from one data repository to another, whether that's directly via `Butler.transfer_from` or with an export file/directory in between.
-The prototype includes another helper context manager (`ButlerExtractor`, which inherits from `LimitedButlerExtractor`) for constructing these batches, and a sketch for how they might be used to define a new more efficient (and less memory-constrained) export file format.
-The prototype's `Butler.export` and `Butler.transfer_from` both use the `ButlerExtractor`, unifying those interface.
+``RawBatch`` also turns out to be a very useful way to describe the transfer of content from one data repository to another, whether that's directly via :meth:`Butler.transfer_from` or with an export file/directory in between.
+The prototype includes another helper context manager (``ButlerExtractor``, which inherits from ``LimitedButlerExtractor``) for constructing these batches, and a sketch for how they might be used to define a new more efficient (and less memory-constrained) export file format.
+The prototype's ``Butler.export`` and ``Butler.transfer_from`` both use the ``ButlerExtractor``, unifying those interface.
 
 Opportunistic API changes
 -------------------------
 
-Moving methods from `Registry` to `Butler` will break existing code - eventually, once the removal of the `Registry` interface actually occurs.
-In the meantime, adding new methods to `Butler` gives us an opportunity to address existing issues and take advantage of new possibilities without introducing breakage.
-In addition to solving this problems, this can help ease migration to the new interfaces by giving users reasons to switch even before the `Registry` methods are deprecated.
+Moving methods from :class:`Registry` to :class:`Butler` will break existing code - eventually, once the removal of the :class:`Registry` interface actually occurs.
+In the meantime, adding new methods to :class:`Butler` gives us an opportunity to address existing issues and take advantage of new possibilities without introducing breakage.
+In addition to solving this problems, this can help ease migration to the new interfaces by giving users reasons to switch even before the :class:`Registry` methods are deprecated.
 
 The prototype includes a few examples of this kind of opportunistic API change, including:
 
-- Our myriad methods for removing datasets and collections have been replaced by the extremely simple `Butler.unstore` method, the more powerful `Butler.removal` method, and the `RemovalHelper` class the latter returns.
+- Our myriad methods for removing datasets and collections have been replaced by the extremely simple ``Butler.unstore`` method, the more powerful ``Butler.removal`` method, and the ``RemovalHelper`` class the latter returns.
   This provides more direct control over and visibility into the relationships that would be broken by removals (CHAINED collection links, dataset associations with TAGGED and CALIBRATION collections).
 
 - The new relation-based query system can do already do some things our current query interfaces have no ways to express, and with a bit more work it could do more still.
-  At the same time, the current `Registry.queryDataIds` and `Registry.queryDimensionRecords` methods take ``datasets`` and ``collections`` arguments whose behavior has consistently been confusing to users (who should usually use `queryDatasets` instead).
-  The prototype proposes both a new power-user `Butler.query` method and more-or-less like-for-like replacements for our current methods, but the replacements for `queryDataIds` and `queryDimensionRecords` drop those arguments, since the subtle functionality they provided is now available via `Butler.query`.
+  At the same time, the current :meth:`Registry.queryDataIds` and :meth:`Registry.queryDimensionRecords` methods take ``datasets`` and ``collections`` arguments whose behavior has consistently been confusing to users (who should usually use :meth:`~Registry.queryDatasets` instead).
+  The prototype proposes both a new power-user ``Butler.query`` method and more-or-less like-for-like replacements for our current methods, but the replacements for :meth:`~Registry.queryDataIds` and :meth:`~Registry.queryDimensionRecords` drop those arguments, since the subtle functionality they provided is now available via `Butler.query`.
 
-- `Registry.setCollectionChain` has been replaced by `Butler.edit_collection_chain`, which ports convenience functionality from our command-line scripts to the Python interface.
+- :meth:`Registry.setCollectionChain` has been replaced by ``Butler.edit_collection_chain``, which ports convenience functionality from our command-line scripts to the Python interface.
 
 .. _implications_for_quantumgraph_generation_and_execution:
 
@@ -373,14 +375,14 @@ Implications for QuantumGraph generation and execution
 .. note::
    This section is a stub.  It may be expanded on a future ticket.
 
-- Attaching Datastore records to DatasetRef objects makes it more natural to for QuantumGraph to hold Datastore records, which it currently does for overall-inputs only, in separate per-quantum containers.
-  Including predicted Datastore records for intermediate and output datasets may also help with storage class conversions, by allowing us to also drop special mapping of dataset type definitions recently added on :jira:`DM-37995` - the key question is whether `Datastore` needs to know the Registry storage class for for a particular dataset type if it also has the `Datastore` records.
-  If it does not, then this may also open up a path to sidestepping storage class migration problems - the Registry storage class for a dataset type could become merely the default for when a storage class is not provided, as we'd always use Datastore records to identify what is on disk on a dataset-by-dataset basis.
+- Attaching Datastore records to :class:`DatasetRef` objects makes it more natural to for :class:`lsst.pipe.base.QuantumGraph` to hold :class:`Datastore` records, which it currently does for overall-inputs only, in separate per-quantum containers.
+  Including predicted :class:`Datastore` records for intermediate and output datasets may also help with storage class conversions, by allowing us to also drop special mapping of dataset type definitions recently added on :jira:`DM-37995` - the key question is whether :class:`Datastore` needs to know the :class:`Registry` storage class for for a particular dataset type if it also has the :class:`Datastore` records.
+  If it does not, then this may also open up a path to sidestepping storage class migration problems - the :class:`Registry` storage class for a dataset type could become merely the default for when a storage class is not provided, as we'd always use :class:`Datastore` records to identify what is on disk on a dataset-by-dataset basis.
 
 - If journal files point to QuantumGraphs sometimes, those QuantumGraphs should be considered part of the data repository.
   This will require additional design work.
 
-- This naturally flows into having pipetask (or a replacement, so we can deprecate a lot of stuff at once instead of piecemeal) use QuantumBackedButler.
+- This naturally flows into having ``pipetask`` (or a replacement, so we can deprecate a lot of stuff at once instead of piecemeal) use :class:`QuantumBackedButler`.
 
 .. Make in-text citations with: :cite:`bibkey`.
 .. Uncomment to use citations
