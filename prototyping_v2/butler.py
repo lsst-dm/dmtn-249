@@ -4,8 +4,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
 from typing import Any, overload
-import enum
 import uuid
+import dataclasses
 
 from lsst.daf.butler import DataId, StorageClass, DataIdValue
 
@@ -26,13 +26,14 @@ from .primitives import (
 from .minimal_butler import MinimalButler
 
 
-class ManifestOperation(enum.Enum):
-    """Enumeration of the types of manifest used to maintain registry/datastore
-    consistency.
-    """
-
-    INSERT = enum.auto()
-    REMOVE = enum.auto()
+@dataclasses.dataclass
+class StorageSyncContext:
+    refs: Mapping[uuid.UUID, DatasetRef]
+    clean: set[uuid.UUID] = dataclasses.field(default_factory=dict)
+    stored: dict[uuid.UUID, dict[OpaqueTableName, DatasetOpaqueRecordSet]] = dataclasses.field(
+        default_factory=dict
+    )
+    unstored: dict[uuid.UUID, set[OpaqueTableName]] = dataclasses.field(default_factory=dict)
 
 
 class Registry(ABC):
@@ -41,7 +42,7 @@ class Registry(ABC):
     """
 
     @abstractmethod
-    def register_manifest(self, name: ManifestName, operation: ManifestOperation) -> tuple[int, bool]:
+    def register_manifest(self, name: ManifestName) -> tuple[int, bool]:
         """Register a manifest for datasets about to be transferred to this
         data repository.
 
@@ -50,9 +51,6 @@ class Registry(ABC):
         name : `str`
             Manifest name.  Should be prefixed with ``u/$USER`` for regular
             non-privileged users.
-        operation : `ManifestOperation`
-            The kind of operation the manifest should track.  This must match
-            the operation of the existing manifest with this name.
 
         Returns
         -------
@@ -73,35 +71,59 @@ class Registry(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def get_manifests(self) -> list[tuple[ManifestName, int]]:
+    def get_all_manifests(self) -> list[tuple[ManifestName, int]]:
         """Return all active manifests."""
         raise NotImplementedError()
 
     @abstractmethod
-    def storage_insertion_manifest(
-        self, manifest_id: int, new_refs: Iterable[DatasetRef]
-    ) -> AbstractContextManager[dict[uuid.UUID, DatasetRef]]:
-        """Return a context manager for storing dataset artifacts in an
-        associated datastore.
+    def synchronize_storage(
+        self,
+        manifest_id: int,
+        insertions: Iterable[DatasetRef] = (),
+        modifications: Iterable[uuid.UUID] = (),
+    ) -> AbstractContextManager[StorageSyncContext]:
+        """Return a context manager for storing or unstoring dataset artifacts
+        in an associated datastore.
+
+        Parameters
+        ----------
+        manifest_id : `int`
+            Unique identifier for an active manifest.
+        insertions : `~collections.abc.Iterable` [ `DatasetRef` ], optional
+            New datasets to insert into the registry and store in a datastore.
+        modifications : `~collections.abc.Iterable` [ `uuid.UUID` ], optional
+            modifications datasets whose datastore artifact storage will be
+            modified.
+
+        Returns
+        -------
+        context
+            Context whose scope should be used to make datastore artifact
+            storage changes.
 
         Notes
         -----
-        On `~AbstractContextManager.__enter__`, this inserts the given datasets
-        into the registry and the ``manifest_dataset`` table, with the latter
-        indicating that the artifacts for those datasets are either currently
-        being written or a problem was encountered with those writes.  This
-        happens within one database transaction, guaranteeing consistency and
-        preventing any other process from attempting to write any datasets with
-        the same UUIDs concurrently.  Errors with invalid or conflicting data
-        IDs will occur at this stage, before any datastore writes are
-        attempted.  If a UUID conflict occurs, the new dataset is ignored, on
-        the *assumption* (difficult for us to check, but guaranteed outside of
-        pathological cases by the properties of UUIDs) that it has the same
-        dataset type and data ID, and we are attempting to now attempting file
-        artifacts for that existing dataset.  The data IDs of given
-        `DatasetRef` objects *and* all datasets present in this manifest
-        returned with fully expanded data IDs and any records they already
-        have (allowing storage in new datastores to be added).
+        On `~AbstractContextManager.__enter__`, within another database
+        transaction:
+
+        - All datasets in ``insertions`` are inserted into the registry's own
+          ``dataset`` and ``dataset_tag_*`` tables.  UUID conflicts are
+          ignoring, which amounts to treating anything here that already exists
+          as if its UUID had been passed in ``modifications`` instead.  Other
+          conflicts and foreign key violations cause failures (with full
+          rollback) at this point.
+
+        - All datasets in ``insertions`` or ``modifications`` are inserted into
+          ``manifest_dataset``, with conflict resolution such that duplicate
+          inserts of a dataset into the same manifest is ignored, but presence
+          of the same dataset in different manifests is an error (with full
+          rollback).
+
+        - Query for datasets in ``manifest_dataset`` for this ``manifest_id``
+          and return them in `StorageSyncContext`, including
+          expanded data IDs and any datastore records currently present. This
+          may return datasets that were previously present in the manifest but
+          were not passed in via eithe ``insertions`` or ``modifications``.
 
         The caller is expected to actually perform datastore artifact writes
         inside the context manager's scope, and only exit that scope without
@@ -109,33 +131,35 @@ class Registry(ABC):
         for artifacts for datasets that were not just passed in to already be
         present (and possibly corrupted/incomplete).
 
-        On `~AbstractContextManager.__exit__`, the `dict` returned by
-        `~AbstractContextManager.__enter__` is compared to the contents of the
-        ``manifest_table``:
+        On `~AbstractContextManager.__exit__`, within another database
+        transaction:
 
-        - Datasets that now have opaque records attached will have those
-          records inserted into the database, marking them as stored in the
-          datastore.  These datasets are removed from the manifest.
+        - Dataset opaque records in `StorageSyncContext.unstored`
+          are deleted from the database.
 
-        - Datasets that do not have opaque records attached will be ignored,
-          leaving them in the registry but marked as unstored by any datastore.
-          These datasets are also removed from the manifest.
+        - Dataset opaque records in `StorageSyncContext.stored` are
+          inserted into the database.  Repeated/conflicting inserts are an
+          error, since this should only be possible due to logic bugs in the
+          caller.  A dataset appear here while also appearing in
+          `StorageSyncContext.unstored` to replace all of its
+          records.
 
-        - Datasets that have been fully removed from the `dict` are ignored and
-          left in the manifest.
+        - All datasets in any of `~StorageSyncContext.unstored`,
+          `~StorageSyncContext.stored`, or
+          `~StorageSyncContext.unchanged` are removed from
+          ``manifest_dataset``.
 
-        Callers must not remove opaque records from datasets that already have
-        them attached; use `storage_removal_manifest` instead.
+        TODO
 
         Note that the exit behavior does not depend on whether an exception was
-        raised, to allow code inside the context block to mark exceptions as
-        being gracefully handled, by leaving them in the returned `dict`
-        without opaque records, while still allowing the exception to propagate
-        up. This does mean that gracefully-handled errors still result in
-        registry entries (but no datastore entries).  This makes it much easier
-        for this method to be idempotent, which is more important than giving
-        it strong exception safety, since we still maintain the data repository
-        consistency guarantees.
+        raised. This allows code inside the context block to mark exceptions as
+        being gracefully handled, by leaving them out of the two, while still
+        allowing the exception to propagate up. This does mean that
+        gracefully-handled errors still result in registry entries (but no
+        datastore entries).  This makes it much easier for this method to be
+        idempotent, which is more important than giving it strong exception
+        safety, since we still maintain the data repository consistency
+        guarantees.
 
         A useful pattern for code inside this context is to `~dict.pop` each
         dataset off of the returned `dict` just before its artifacts are
