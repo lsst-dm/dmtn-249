@@ -24,4 +24,5 @@ InMemoryDataset: TypeAlias = Any
 OpaqueTableName: TypeAlias = str
 StorageClassName: TypeAlias = str
 FormatterName: TypeAlias = str
-ManifestName: TypeAlias = str
+WorkspaceName: TypeAlias = str
+TransferMode: TypeAlias = str

@@ -3,13 +3,13 @@ from __future__ import annotations
 __all__ = ("ExtensionConfig", "RegistryConfig", "DatastoreConfig", "StorageClassConfig", "ButlerConfig")
 
 from abc import ABC, abstractmethod
-from typing import Any, Self, TYPE_CHECKING
-import pydantic
-from pydantic_core import core_schema
+from typing import TYPE_CHECKING, Any, Self
 
-from lsst.utils.introspection import get_full_type_name
-from lsst.utils.doImport import doImportType
+import pydantic
 from lsst.resources import ResourcePath
+from lsst.utils.doImport import doImportType
+from lsst.utils.introspection import get_full_type_name
+from pydantic_core import core_schema
 
 if TYPE_CHECKING:
     from .butler import Datastore, Registry
@@ -116,4 +116,6 @@ class StorageClassConfig(pydantic.BaseModel):
 class ButlerConfig(pydantic.BaseModel):
     registry: RegistryConfig
     datastore: DatastoreConfig
-    storage_classes: dict[str, StorageClassConfig]
+    storageClasses: dict[str, StorageClassConfig]
+    workspaceRoot: ResourcePath
+    workspaceOptions: dict[str, Any]

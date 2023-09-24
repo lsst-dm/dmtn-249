@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import dataclasses
 import enum
+from abc import ABC, abstractmethod
 from collections.abc import Hashable, Mapping, Set
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -16,8 +16,8 @@ if TYPE_CHECKING:
         CollectionName,
         DatasetTypeName,
         DimensionName,
-        StorageClassName,
         OpaqueTableName,
+        StorageClassName,
     )
     from .butler import Datastore
 
@@ -104,6 +104,34 @@ class SignedPermissions(enum.Flag):
     GET = enum.auto()
     PUT = enum.auto()
     DELETE = enum.auto()
+
+
+class SequenceEditMode(enum.Enum):
+    """Enum for edit operations on sequences."""
+
+    ASSIGN = enum.auto()
+    REMOVE = enum.auto()
+    EXTEND = enum.auto()
+    PREPEND = enum.auto()
+
+
+class SetInsertMode(enum.Enum):
+    """Enum for insert operations on sets."""
+
+    INSERT_OR_FAIL = enum.auto()
+    INSERT_OR_SKIP = enum.auto()
+    INSERT_OR_REPLACE = enum.auto()
+
+
+class SetEditMode(enum.Enum):
+    """Enum for edit operations on sets."""
+
+    INSERT_OR_FAIL = SetInsertMode.INSERT_OR_FAIL
+    INSERT_OR_SKIP = SetInsertMode.INSERT_OR_SKIP
+    INSERT_OR_REPLACE = SetInsertMode.INSERT_OR_REPLACE
+    ASSIGN = enum.auto()
+    REMOVE = enum.auto()
+    DISCARD = enum.auto()
 
 
 class DatasetOpaqueRecordSet(pydantic.BaseModel, ABC):
