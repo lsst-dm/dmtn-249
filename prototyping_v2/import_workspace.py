@@ -61,14 +61,14 @@ class ImportWorkspace(InternalWorkspace):
         batch = copy.deepcopy(self._db_only_batch)
         for ref in self._manifest.extract_refs():
             batch.dataset_insertions.setdefault(ref.run, {}).setdefault(ref.dataset_type.name, []).append(
-                DatasetInsertion(ref.uuid, ref.data_id.values_tuple())
+                DatasetInsertion(uuid=ref.uuid, data_coordinate_values=ref.data_id.values_tuple())
             )
         # Do the actual datastore artifact transfers.
         records = self._parent._datastore.execute_transfer_manifest(self._manifest, self._origin)
         # Include the records derived from those artifact transfers in the
         # registry batch.
         for table_name, table_data in records.items():
-            batch.opaque_table_insertions.setdefault(table_name, {}).update(table_data)
+            batch.opaque_table_insertions.root.setdefault(table_name, {}).update(table_data)
         # Do all the registry insertions.
         self._parent._registry.execute_batch(batch)
         # Delete the workspace config and its registry entry.

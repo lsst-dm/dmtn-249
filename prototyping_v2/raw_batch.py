@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 import uuid
 from typing import TYPE_CHECKING, Any, final
 
@@ -13,14 +12,18 @@ if TYPE_CHECKING:
     from .aliases import (
         CollectionDocumentation,
         CollectionName,
-        ColumnName,
         DatasetTypeName,
         DimensionElementName,
-        DimensionName,
         OpaqueTableName,
         StorageClassName,
     )
-    from .primitives import DatasetOpaqueRecordSet, DatasetRef, DatasetType
+    from .primitives import (
+        DatasetRef,
+        DatasetType,
+        OpaqueTableRecordSet,
+        DimensionGroup,
+        RepoValidationContext,
+    )
 
 
 @final
@@ -46,7 +49,7 @@ class RawBatch(pydantic.BaseModel):
         default_factory=dict
     )
 
-    dimension_syncs: dict[DimensionElementName, DimensionDataSync] = pydantic.Field(default_factory=dict)
+    dimension_syncs: list[DimensionDataSync] = pydantic.Field(default_factory=list)
 
     dimension_insertions: list[DimensionDataInsertion] = pydantic.Field(default_factory=list)
 
@@ -61,9 +64,7 @@ class RawBatch(pydantic.BaseModel):
         | SetCollectionDocumentation
     ] = pydantic.Field(default_factory=list)
 
-    opaque_table_insertions: dict[OpaqueTableName, dict[uuid.UUID, DatasetOpaqueRecordSet]] = pydantic.Field(
-        default_factory=dict
-    )
+    opaque_table_insertions: OpaqueTableRecordSet = pydantic.Field(default_factory=dict)
 
     opaque_table_removals: dict[OpaqueTableName, set[uuid.UUID]] = pydantic.Field(default_factory=dict)
 
@@ -74,12 +75,12 @@ class RawBatch(pydantic.BaseModel):
     dataset_type_removals: set[DatasetTypeName] = pydantic.Field(default_factory=set)
 
 
-@dataclasses.dataclass
-class DatasetTypeRegistration:
+@final
+class DatasetTypeRegistration(pydantic.BaseModel):
     """Serializable representation of a dataset type registration operation."""
 
     # No name, since that's the key in a dict and this is the value.
-    dimensions: set[DimensionName]
+    dimensions: DimensionGroup
     storage_class_name: StorageClassName
     is_calibration: bool
     update: bool
@@ -87,15 +88,15 @@ class DatasetTypeRegistration:
     @classmethod
     def from_dataset_type(cls, dataset_type: DatasetType, update: bool) -> DatasetTypeRegistration:
         return cls(
-            set(dataset_type.dimensions),
-            dataset_type.storage_class_name,
-            dataset_type.is_calibration,
+            dimensions=dataset_type.dimensions,
+            storage_class_name=dataset_type.storage_class_name,
+            is_calibration=dataset_type.is_calibration,
             update=update,
         )
 
 
-@dataclasses.dataclass
-class CollectionRegistration:
+@final
+class CollectionRegistration(pydantic.BaseModel):
     """Serializable representation of a collection registration operation."""
 
     # No name, since that's the key in a dict and this is the value.
@@ -103,16 +104,16 @@ class CollectionRegistration:
     doc: CollectionDocumentation
 
 
-@dataclasses.dataclass
-class SetCollectionDocumentation:
+@final
+class SetCollectionDocumentation(pydantic.BaseModel):
     """Serializable representation of a collection documentation assignment."""
 
     name: CollectionName
     doc: CollectionDocumentation
 
 
-@dataclasses.dataclass
-class ChainedCollectionEdit:
+@final
+class ChainedCollectionEdit(pydantic.BaseModel):
     """Serializable representation of a CHAINED collection modification."""
 
     chain: CollectionName
@@ -121,8 +122,8 @@ class ChainedCollectionEdit:
     flatten: bool = False
 
 
-@dataclasses.dataclass
-class TaggedCollectionEdit:
+@final
+class TaggedCollectionEdit(pydantic.BaseModel):
     """Serializable representation of a TAGGED collection modification."""
 
     collection: CollectionName
@@ -130,26 +131,58 @@ class TaggedCollectionEdit:
     mode: SetEditMode
 
 
-@dataclasses.dataclass
-class DimensionDataSync:
+@final
+class DimensionDataSync(pydantic.BaseModel):
     """Serializable representation of a dimension-data sync operation."""
 
-    # No element name because that's the key of the dict and this is the value.
-    records: list[dict[ColumnName, Any]]
+    element: DimensionElementName
+
+    # We use SerializeAsAny to avoid type-slicing when doing a pydantic dump.
+    records: list[pydantic.SerializeAsAny[DimensionRecord]]
     update: bool = False
-    on_insert: list[DimensionDataInsertion] = dataclasses.field(default_factory=list)
-    on_update: list[DimensionDataInsertion] = dataclasses.field(default_factory=list)
+    on_insert: list[DimensionDataInsertion] = pydantic.Field(default_factory=list)
+    on_update: list[DimensionDataInsertion] = pydantic.Field(default_factory=list)
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def _convert_records(cls, data: Any, info: pydantic.ValidationInfo) -> DimensionDataSync:
+        match data:
+            case DimensionDataSync() as done:
+                return done
+            case {
+                "element": str(element_name),
+                "records": list(records),
+                "update": bool(update),
+                "on_insert": list(on_insert),
+                "on_update": list(on_update),
+            }:
+                context = RepoValidationContext.from_info(info)
+                element = context.universe[element_name]
+                type_adapter: pydantic.TypeAdapter[Any] = pydantic.TypeAdapter(element.RecordClass)
+                return cls.model_construct(
+                    element=element_name,
+                    records=[type_adapter.validate_python(r) for r in records],
+                    update=update,
+                    on_insert=[
+                        DimensionDataInsertion.model_validate(r, context=info.context) for r in on_insert
+                    ],
+                    on_update=[
+                        DimensionDataInsertion.model_validate(r, context=info.context) for r in on_update
+                    ],
+                )
+            case _:
+                raise ValueError(f"Could not validate {data} as DimensionDataSync.")
 
 
-@dataclasses.dataclass
-class DimensionDataInsertion:
+@final
+class DimensionDataInsertion(pydantic.BaseModel):
     """Serializable representation of a dimension-data insertion."""
 
     element: DimensionElementName
     """Element whose records this object holds.
     """
 
-    records: list[DimensionRecord] = dataclasses.field(default_factory=list)
+    records: list[pydantic.SerializeAsAny[DimensionRecord]] = pydantic.Field(default_factory=list)
     """Records to insert.
 
     Unlike DatasetRef and DataCoordinate, DimensionRecords are simple structs
@@ -164,8 +197,8 @@ class DimensionDataInsertion:
     """
 
 
-@dataclasses.dataclass
-class DatasetInsertion:
+@final
+class DatasetInsertion(pydantic.BaseModel):
     """Serializable representation of a registry dataset insertion."""
 
     # No dataset type or RUN because those are keys in a nested dict and this
