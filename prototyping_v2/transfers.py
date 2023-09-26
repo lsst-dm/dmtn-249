@@ -1,101 +1,142 @@
 from __future__ import annotations
 
-import dataclasses
 import uuid
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Protocol
 
-from lsst.daf.butler import DataCoordinate, Formatter
+import pydantic
+
+from lsst.daf.butler import DataCoordinate
 from lsst.resources import ResourcePath
 
-from .aliases import CollectionName, TransferMode
-from .butler import ArtifactTransferRequest
-from .primitives import DatasetType
+from .aliases import TransferMode, DatasetTypeName, StorageClassName, CollectionName
+from .primitives import DatasetRef, DatasetType, DatasetOpaqueRecordSet, EmptyOpaqueRecordSet, Checksum
 
 
-@dataclasses.dataclass
-class SingleDatasetFileTransferRequest(ArtifactTransferRequest):
-    """Transfer request for a single-complete-dataset file that will be
-    ingested by copying that file to the destination datastore root.
-    """
-
-    run: CollectionName
-    uuid: uuid.UUID
-    dataset_type: DatasetType
-    data_id: DataCoordinate
-    formatter: type[Formatter]
+class ArtifactTransferRequest(Protocol):
     transfer_mode: TransferMode
-    origin_uri: ResourcePath
+
+    def extract_refs(
+        self,
+        run: CollectionName,
+        get_dataset_type: Callable[[DatasetTypeName, StorageClassName], DatasetType],
+        get_data_coordinate: Callable[[uuid.UUID], DataCoordinate],
+    ) -> list[DatasetRef]:
+        ...
+
+    def extract_files(self) -> list[tuple[ResourcePath, Checksum | None]]:
+        """Return URIs (signed for GET if necessary) and optional checksums."""
+        ...
 
 
-@dataclasses.dataclass
-class SingleDatasetFileReferenceRequest(ArtifactTransferRequest):
-    """Transfer request for a single-complete-dataset file that will be
-    ingested via an absolute external URI.
+class DatasetFileTransferRequest(pydantic.BaseModel):
+    """Transfer request for a single-complete-dataset file.
+
+    This is the transfer request type normally emitted by `FileDatastore` for
+    both the usual single-dataset-single-file and the
+    disassembled-by-components case.
+
+    Data IDs, dataset type dimensions, and the mapping from opaque table name
+    to `DatasetOpaqueRecordSet` type are expected to be passed separately.
     """
 
-    run: CollectionName
-    uuid: uuid.UUID
-    dataset_type: DatasetType
-    data_id: DataCoordinate
-    formatter: type[Formatter]
-    uri: ResourcePath
-
-
-@dataclasses.dataclass
-class DisassembledDatasetFileTransferRequest(ArtifactTransferRequest):
-    """Transfer request for a collection of files that together comprise a
-    complete dataset, with each file corresponding to a component dataset, to
-    be ingested by copying all files to the destination datastore root.
-    """
-
-    run: CollectionName
-    uuid: uuid.UUID
-    dataset_type: DatasetType
-    data_id: DataCoordinate
-    formatter: type[Formatter]
+    dataset_uuid: uuid.UUID
+    dataset_type_name: DatasetTypeName
+    storage_class_name: StorageClassName
     transfer_mode: TransferMode
-    component_origin_uris: list[tuple[str, ResourcePath]]
+    opaque_records: DatasetOpaqueRecordSet
+
+    def extract_refs(
+        self,
+        run: CollectionName,
+        get_dataset_type: Callable[[DatasetTypeName, StorageClassName], DatasetType],
+        get_data_coordinate: Callable[[uuid.UUID], DataCoordinate],
+    ) -> list[DatasetRef]:
+        return [
+            DatasetRef(
+                self.dataset_uuid,
+                get_dataset_type(self.dataset_type_name, self.storage_class_name),
+                get_data_coordinate(self.dataset_uuid),
+                run=run,
+                _opaque_records=self.opaque_records,
+            )
+        ]
 
 
-@dataclasses.dataclass
-class DisassembledDatasetFileReferenceRequest(ArtifactTransferRequest):
-    """Transfer request for a collection of files that together comprise a
-    complete dataset, with each file corresponding to a component dataset, to
-    be ingested via absolute external URIs.
-    """
-
-    run: CollectionName
-    uuid: uuid.UUID
-    dataset_type: DatasetType
-    data_id: DataCoordinate
-    formatter: type[Formatter]
-    component_uris: list[tuple[str, ResourcePath]]
-
-
-@dataclasses.dataclass
-class MultipleCoordinateDatasetFileReferenceRequest(ArtifactTransferRequest):
+class MultipleCoordinateFileTransferRequest(pydantic.BaseModel):
     """Transfer request for a single file that holds multiple datasets
-    corresponding to different data IDs, to be ingested via absolute external
-    URIs.
+    corresponding to different data IDs.
+
+    This is the transfer request type needed for DECam raws.  We may want to
+    limit `FileDatastore` acceptance of these requests to only
+    ``transfer_mode="direct"``, since that absolves us of responsibility for
+    being able to delete them.  Being able to delete these safely requires
+    querying for all other datasets that have the same URI, which is a big
+    complication we probably want to drop.
     """
 
-    run: CollectionName
-    dataset_type: DatasetType
+    dataset_type_name: DatasetTypeName
+    storage_class_name: StorageClassName
     common_data_id: DataCoordinate
-    children: list[tuple[uuid.UUID, DataCoordinate]]
-    formatter: type[Formatter]
-    uri: ResourcePath
+    child_records: dict[uuid.UUID, DatasetOpaqueRecordSet]
+    transfer_mode: TransferMode
+
+    def extract_refs(
+        self,
+        run: CollectionName,
+        get_dataset_type: Callable[[DatasetTypeName, StorageClassName], DatasetType],
+        get_data_coordinate: Callable[[uuid.UUID], DataCoordinate],
+    ) -> list[DatasetRef]:
+        return [
+            DatasetRef(
+                dataset_uuid,
+                get_dataset_type(self.dataset_type_name, self.storage_class_name),
+                get_data_coordinate(dataset_uuid),
+                run=run,
+                _opaque_records=dataset_records,
+            )
+            for dataset_uuid, dataset_records in self.child_records.items()
+        ]
 
 
-# There is no MultipleCoordinateDatasetFileTransferRequest right now because
-# managing those artifacts (i.e. knowing when we can safely delete them) is a
-# pain, and something I propose we try to not support for now.  So we could add
-# the request object, but I don't think we should try to have a datastore that
-# could accept such a request.
+class MultipleTypeFileTransferRequestDataset(pydantic.BaseModel):
+    dataset_uuid: uuid.UUID
+    dataset_type_name: DatasetTypeName
+    storage_class_name: StorageClassName
+    opaque_records: DatasetOpaqueRecordSet
 
 
-@dataclasses.dataclass
-class StructuredDataWriteRequest(ArtifactTransferRequest):
+class MultipleTypeFileTransferRequest(pydantic.BaseModel):
+    """Transfer request for a single file that holds multiple datasets with
+    the same data ID and different dataset types.
+
+    We do not have datastore support for this type of storage yet, but it'd be
+    nice to have for merging execution metadata (task metadata, logs,
+    provenance files) after execution.
+    """
+
+    transfer_mode: TransferMode
+    datasets: list[MultipleTypeFileTransferRequestDataset]
+
+    def extract_refs(
+        self,
+        run: CollectionName,
+        get_dataset_type: Callable[[DatasetTypeName, StorageClassName], DatasetType],
+        get_data_coordinate: Callable[[uuid.UUID], DataCoordinate],
+    ) -> list[DatasetRef]:
+        return [
+            DatasetRef(
+                dataset.dataset_uuid,
+                get_dataset_type(dataset.dataset_type_name, dataset.storage_class_name),
+                get_data_coordinate(dataset.dataset_uuid),
+                run=run,
+                _opaque_records=dataset.opaque_records,
+            )
+            for dataset in self.datasets
+        ]
+
+
+class StructuredDataTransferRequest(pydantic.BaseModel):
     """A transfer request that directly sends a JSON-compatible nested dict to
     be saved.
 
@@ -105,8 +146,50 @@ class StructuredDataWriteRequest(ArtifactTransferRequest):
     metric storage class and upload them, etc...
     """
 
-    run: CollectionName
-    uuid: uuid.UUID
-    dataset_type: DatasetType
-    data_id: DataCoordinate
-    content: dict[str, Any]
+    dataset_uuid: uuid.UUID
+    dataset_type_name: DatasetTypeName
+    storage_class_name: StorageClassName
+    data: dict[str, Any]
+
+    def extract_refs(
+        self,
+        run: CollectionName,
+        get_dataset_type: Callable[[DatasetTypeName, StorageClassName], DatasetType],
+        get_data_coordinate: Callable[[uuid.UUID], DataCoordinate],
+    ) -> list[DatasetRef]:
+        return [
+            DatasetRef(
+                self.dataset_uuid,
+                get_dataset_type(self.dataset_type_name, self.storage_class_name),
+                get_data_coordinate(self.dataset_uuid),
+                run=run,
+                _opaque_records=DatasetOpaqueRecordSet(EmptyOpaqueRecordSet()),
+            )
+        ]
+
+
+class OpaqueRecordTransferRequest(pydantic.BaseModel):
+    """A transfer request that directly sends opaque records that fully
+    represent the dataset (i.e. there is no separate artifact).
+    """
+
+    dataset_uuid: uuid.UUID
+    dataset_type_name: DatasetTypeName
+    storage_class_name: StorageClassName
+    opaque_records: DatasetOpaqueRecordSet
+
+    def extract_refs(
+        self,
+        run: CollectionName,
+        get_dataset_type: Callable[[DatasetTypeName, StorageClassName], DatasetType],
+        get_data_coordinate: Callable[[uuid.UUID], DataCoordinate],
+    ) -> list[DatasetRef]:
+        return [
+            DatasetRef(
+                self.dataset_uuid,
+                get_dataset_type(self.dataset_type_name, self.storage_class_name),
+                get_data_coordinate(self.dataset_uuid),
+                run=run,
+                _opaque_records=self.opaque_records,
+            )
+        ]

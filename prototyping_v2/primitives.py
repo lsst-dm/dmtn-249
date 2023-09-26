@@ -5,7 +5,7 @@ import enum
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Hashable, Mapping, Set, Iterable
-from typing import TYPE_CHECKING, Any, Iterator, final, Dict
+from typing import TYPE_CHECKING, Any, Iterator, final, Self, NewType
 
 import pydantic
 from pydantic_core import core_schema
@@ -33,39 +33,81 @@ class SignedPermissions(enum.Flag):
     DELETE = enum.auto()
 
 
-class DatasetOpaqueRecordSet(ABC):
-    """A set of records that correspond to a single (parent) dataset in a
-    single opaque table.
+class Checksum(pydantic.BaseModel):
+    hex: str
+    algorithm: str
 
-    These sets will *very* frequently hold only a single record (they only need
-    to hold more to support disassembled components), and we anticipate a
-    concrete subclass optimized for this.
 
-    Concrete subclasses are expected to be dataclasses, Pydantic models, or
-    primitives that Pydantic knows how to serialize and validate (i.e.
-    ``pydantic.TypeAdapter(instance)`` should work).
-    """
+class OpaqueRecordSet(ABC):
+    @abstractmethod
+    @classmethod
+    def from_json_data(cls, data: Any) -> Self:
+        raise NotImplementedError()
 
     @abstractmethod
-    def extract_unsigned_uris(self) -> dict[Hashable, ResourcePath]:
+    @classmethod
+    def make_empty(cls) -> Self:
+        raise NotImplementedError()
+
+    @property
+    @abstractmethod
+    def tables(self) -> Set[OpaqueTableName]:
+        raise NotImplementedError()
+
+    @property
+    @abstractmethod
+    def datasets(self) -> Set[uuid.UUID]:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def __bool__(self) -> bool:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def filter_dataset(self, uuid: uuid.UUID) -> OpaqueRecordSet:
+        """Return just the records corresponding to a single dataset."""
+        raise NotImplementedError()
+
+    @abstractmethod
+    def update(self, other: OpaqueRecordSet) -> None:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def to_sql_rows(self, table: OpaqueTableName) -> tuple[dict[str, Any], ...]:
+        """Extract the records for one table as a tuple of mappings, where each
+        mapping corresponds to a row in that table.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def insert_sql_rows(self, table: OpaqueTableName, rows: Iterable[Mapping[str, Any]]) -> None:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def to_json_data(self) -> Any:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def extract_files(self) -> dict[Hashable, tuple[ResourcePath, Checksum | None]]:
         """Return any URIs embedded in these records that may need to be
         signed.
 
         Returns
         -------
         uris : `dict` [ `~collections.abc.Hashable`, \
-                `~lsst.resources.ResourcePath` ]
-            Unsigned URIs embedded in these records.  Key interpretation is
-            datastore-specific and opaque the caller.
+                `tuple` [ `~lsst.resources.ResourcePath`, `Checksum` | `None` \
+                    ] ]
+            Unsigned URIs embedded in these records and their checksums, if
+            known.  Key interpretation is datastore-specific and opaque the
+            caller.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def with_signed_uris(
+    def add_signed_uris(
         self, permissions: SignedPermissions, signed: Mapping[Hashable, ResourcePath]
-    ) -> DatasetOpaqueRecordSet:
-        """Return a record set that holds the given signed URIs as well as its
-        original unsigned URIs.
+    ) -> None:
+        """Add the given signed URIs to this object.
 
         Parameters
         ----------
@@ -74,23 +116,81 @@ class DatasetOpaqueRecordSet(ABC):
         signed : `~collections.abc.Mapping` [ `~collections.abc.Hashable`, \
                 `~lsst.resources.ResourcePath` ]
             Signed URIs with the same keys as the unsigned-URI mapping returned
-            by `extract_unsigned_uris`.
-
-        Returns
-        -------
-        records : `DatasetOpaqueRecordSet`
-            Record set that includes the signed URIs.  May be ``self`` if it is
-            mutable and was modified in place.  Need not be the same derived
-            type as self.
+            by `extract_files`.
         """
         raise NotImplementedError()
 
-    @abstractmethod
-    def to_sql_rows(self, uuid: uuid.UUID) -> tuple[dict[str, Any], ...]:
-        """Convert to a tuple of mappings where each mapping corresponds to a
-        row in the corresponding SQL table.
-        """
-        raise NotImplementedError()
+    @classmethod
+    def _pydantic_validate(cls, data: Any, info: pydantic.ValidationInfo) -> Self:
+        if isinstance(data, cls):
+            return data
+        context = RepoValidationContext.from_info(info)
+        assert issubclass(context.opaque_record_type, cls)
+        return context.opaque_record_type.from_json_data(data)
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: pydantic.GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        from_dict_schema = core_schema.chain_schema(
+            [
+                core_schema.dict_schema(keys_schema=core_schema.str_schema()),
+                core_schema.general_plain_validator_function(cls._pydantic_validate),
+            ]
+        )
+        return core_schema.json_or_python_schema(
+            json_schema=from_dict_schema,
+            python_schema=core_schema.union_schema([core_schema.is_instance_schema(cls), from_dict_schema]),
+            serialization=core_schema.plain_serializer_function_ser_schema(cls.to_json_data),
+        )
+
+
+# Opaque records that are guaranteed to correspond to a single dataset.
+DatasetOpaqueRecordSet = NewType("DatasetOpaqueRecordSet", OpaqueRecordSet)
+
+
+class EmptyOpaqueRecordSet(OpaqueRecordSet):
+    @classmethod
+    def from_json_data(cls, data: Any) -> Self:
+        return cls()
+
+    @classmethod
+    def make_empty(cls) -> Self:
+        return cls()
+
+    @property
+    def tables(self) -> Set[OpaqueTableName]:
+        return frozenset()
+
+    @property
+    def datasets(self) -> Set[uuid.UUID]:
+        return frozenset()
+
+    def __bool__(self) -> bool:
+        return False
+
+    def filter_dataset(self, uuid: uuid.UUID) -> OpaqueRecordSet:
+        raise LookupError("Opaque record set is empty.")
+
+    def update(self, other: OpaqueRecordSet) -> None:
+        raise TypeError("Cannot update EmptyOpaqueRecordSet in place.")
+
+    def to_sql_rows(self, table: OpaqueTableName) -> tuple[dict[str, Any], ...]:
+        return ()
+
+    def insert_sql_rows(self, table: OpaqueTableName, rows: Iterable[Mapping[str, Any]]) -> None:
+        raise TypeError("Cannot update EmptyOpaqueRecordSet in place.")
+
+    def to_json_data(self) -> Any:
+        return {}
+
+    def extract_files(self) -> dict[Hashable, tuple[ResourcePath, Checksum | None]]:
+        return {}
+
+    def add_signed_uris(
+        self, permissions: SignedPermissions, signed: Mapping[Hashable, ResourcePath]
+    ) -> None:
+        assert not signed
 
 
 @final
@@ -102,13 +202,13 @@ class RepoValidationContext:
     """
 
     universe: DimensionUniverse
-    opaque_record_types: Mapping[OpaqueTableName, type[DatasetOpaqueRecordSet]]
+    opaque_record_type: type[OpaqueRecordSet]
 
     @classmethod
     def from_info(cls, info: pydantic.ValidationInfo) -> RepoValidationContext:
         if info.context is None:
             raise ValueError("This object cannot be deserialized without a RepoValidationContext provided.")
-        return cls(universe=info.context["universe"], opaque_record_types=info.context["opaque_record_types"])
+        return cls(universe=info.context["universe"], opaque_record_type=info.context["opaque_record_type"])
 
 
 @final
@@ -193,8 +293,8 @@ class DatasetRef:
     data_id: DataCoordinate
     run: CollectionName
 
-    _opaque_records: Mapping[OpaqueTableName, DatasetOpaqueRecordSet] | None = None
-    """Opaque records associated with this dataset, keyed by table name.
+    _opaque_records: DatasetOpaqueRecordSet | None = None
+    """Opaque records associated with this dataset.
 
     This will be used initially to store FileDatastore metadata records, but it
     could be used to store anything a Datastore likes.
@@ -216,17 +316,6 @@ class DatasetRef:
             URIs for the dataset.
         """
         raise NotImplementedError("TODO: call `extract_unsigned_uris` on opaque_records.")
-
-    @classmethod
-    def from_mapping(
-        cls,
-        data: Mapping[str, Any],
-        *,
-        record_set_types: Mapping[OpaqueTableName, type[DatasetOpaqueRecordSet]] | None = None,
-    ) -> DatasetRef:
-        raise NotImplementedError(
-            "TODO: validate with pydantic but use `record_set_types` for _opaque_records."
-        )
 
 
 class SequenceEditMode(enum.Enum):
@@ -255,40 +344,6 @@ class SetEditMode(enum.Enum):
     ASSIGN = enum.auto()
     REMOVE = enum.auto()
     DISCARD = enum.auto()
-
-
-@final
-class OpaqueTableRecordSet(
-    pydantic.RootModel[
-        Dict[OpaqueTableName, Dict[uuid.UUID, pydantic.SerializeAsAny[DatasetOpaqueRecordSet]]]
-    ]
-):
-    root: Dict[OpaqueTableName, Dict[uuid.UUID, pydantic.SerializeAsAny[DatasetOpaqueRecordSet]]]
-
-    @pydantic.model_validator(mode="before")
-    @classmethod
-    def _validate(cls, data: Any, info: pydantic.ValidationInfo) -> OpaqueTableRecordSet:
-        match data:
-            case OpaqueTableRecordSet() as done:
-                return done
-            case _:
-                # Check that the outer structure of the dictionary is what
-                # we expect.
-                mapping: dict[OpaqueTableName, dict[uuid.UUID, Any]] = pydantic.TypeAdapter(
-                    dict[OpaqueTableName, dict[uuid.UUID, Any]]
-                ).validate_python(data)
-        context = RepoValidationContext.from_info(info)
-        # Iterate over nested records and validate/coerce them to the type in
-        # the schema.
-        for table_name, records_for_table in mapping.items():
-            record_adapter: pydantic.TypeAdapter = pydantic.TypeAdapter(
-                context.opaque_record_types[table_name]
-            )
-            for dataset_uuid, serialized in records_for_table.items():
-                records_for_table[dataset_uuid] = record_adapter.validate_python(
-                    serialized, context=info.context
-                )
-        return cls.model_construct(data)
 
 
 @final

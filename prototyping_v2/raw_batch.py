@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .primitives import (
         DatasetRef,
         DatasetType,
-        OpaqueTableRecordSet,
+        OpaqueRecordSet,
         DimensionGroup,
         RepoValidationContext,
     )
@@ -64,7 +64,7 @@ class RawBatch(pydantic.BaseModel):
         | SetCollectionDocumentation
     ] = pydantic.Field(default_factory=list)
 
-    opaque_table_insertions: OpaqueTableRecordSet = pydantic.Field(default_factory=dict)
+    opaque_table_insertions: OpaqueRecordSet | None = None
 
     opaque_table_removals: dict[OpaqueTableName, set[uuid.UUID]] = pydantic.Field(default_factory=dict)
 

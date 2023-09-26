@@ -67,8 +67,10 @@ class ImportWorkspace(InternalWorkspace):
         records = self._parent._datastore.execute_transfer_manifest(self._manifest, self._origin)
         # Include the records derived from those artifact transfers in the
         # registry batch.
-        for table_name, table_data in records.items():
-            batch.opaque_table_insertions.root.setdefault(table_name, {}).update(table_data)
+        if batch.opaque_table_insertions is None:
+            batch.opaque_table_insertions = records
+        else:
+            batch.opaque_table_insertions.update(records)
         # Do all the registry insertions.
         self._parent._registry.execute_batch(batch)
         # Delete the workspace config and its registry entry.
@@ -139,7 +141,7 @@ class ImportWorkspaceFactory(WorkspaceFactory[ImportWorkspace]):
         parent_config: ButlerConfig,
     ) -> tuple[ImportWorkspace, WorkspaceConfig]:
         requests = self.origin.make_transfer_requests(self.transfer_refs)
-        manifest = parent._datastore.receive_transfer_requests(requests, self.origin)
+        manifest = parent._datastore.receive_transfer_requests(self.transfer_refs, requests, self.origin)
         assert workspace_id is not None, "Import workspaces are always internal."
         workspace_config = WorkspaceConfig(
             name=name,

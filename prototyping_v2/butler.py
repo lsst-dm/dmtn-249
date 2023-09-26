@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import getpass
-import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from datetime import datetime
@@ -19,19 +18,19 @@ from .aliases import (
     DatasetTypeName,
     GetParameter,
     InMemoryDataset,
-    OpaqueTableName,
     WorkspaceName,
 )
 from .config import ButlerConfig, DatastoreConfig
 from .import_workspace import ImportWorkspaceFactory
 from .minimal_butler import MinimalButler
 from .primitives import (
-    DatasetOpaqueRecordSet,
+    OpaqueRecordSet,
     DatasetRef,
     DatasetType,
     DeferredDatasetHandle,
 )
 from .raw_batch import RawBatch
+from .transfers import ArtifactTransferRequest
 from .workspace import (
     CorruptedWorkspaceError,
     ExternalWorkspace,
@@ -87,23 +86,6 @@ class Registry(ABC):
         batch : `RawBatch`
             Serializable description of the operations to be performed.
         """
-        raise NotImplementedError()
-
-
-class ArtifactTransferRequest(ABC):
-    @abstractmethod
-    def extract_refs(self) -> Iterable[DatasetRef]:
-        """All `DatasetRef` objects included in these artifacts.
-
-        Some or all of these refs may be passed to `Datastore.get_many` to read
-        objects into memory and re-write then as different artifacts, as a
-        fallback for the case where the specific transfer request is not
-        recognized by the destination datastore.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def extract_runs(self) -> Iterable[CollectionName]:
         raise NotImplementedError()
 
 
@@ -182,7 +164,7 @@ class Datastore(ABC):
 
     @abstractmethod
     def receive_transfer_requests(
-        self, requests: Iterable[ArtifactTransferRequest], origin: Datastore
+        self, refs: Iterable[DatasetRef], requests: Iterable[ArtifactTransferRequest], origin: Datastore
     ) -> TransferManifest:
         """Create a manifest that records how this datastore would receive the
         given artifacts from another datastore.
@@ -191,6 +173,7 @@ class Datastore(ABC):
 
         Parameters
         ----------
+        TODO: make refs a convenience collection
         requests : `~collections.abc.Iterable` [ `ArtifactTransferRequest` ]
             Artifacts according to the origin datastore.  Minimal-effort
             transfers - like file copies - preserve artifacts, but in the
@@ -202,9 +185,7 @@ class Datastore(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def execute_transfer_manifest(
-        self, manifest: TransferManifest, origin: Datastore
-    ) -> dict[OpaqueTableName, dict[uuid.UUID, DatasetOpaqueRecordSet]]:
+    def execute_transfer_manifest(self, manifest: TransferManifest, origin: Datastore) -> OpaqueRecordSet:
         raise NotImplementedError()
 
     @abstractmethod
