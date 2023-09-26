@@ -21,7 +21,14 @@ from .artifact_transfer import ArtifactTransferManifest, ArtifactTransferRequest
 from .config import ButlerConfig, DatastoreConfig
 from .import_workspace import ImportWorkspaceFactory
 from .minimal_butler import MinimalButler
-from .primitives import DatasetRef, DatasetType, DeferredDatasetHandle, OpaqueRecordSet
+from .primitives import (
+    DatasetOpaqueRecordSet,
+    DatasetRef,
+    DatasetType,
+    DeferredDatasetHandle,
+    OpaqueRecordSet,
+)
+from .put_workspace import PutWorkspaceFactory
 from .raw_batch import RawBatch
 from .workspace import (
     CorruptedWorkspaceError,
@@ -112,7 +119,9 @@ class Datastore(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def make_transfer_requests(self, refs: Iterable[DatasetRef]) -> Iterable[ArtifactTransferRequest]:
+    def make_transfer_requests(
+        self, refs: Iterable[DatasetRef], transfer_mode: str
+    ) -> Iterable[ArtifactTransferRequest]:
         """Map the given datasets into artifact transfer requests that could
         be used to transfer those datasets to another datastore.
 
@@ -153,6 +162,14 @@ class Datastore(ABC):
 
     @abstractmethod
     def abandon_transfer_manifest(self, manifest: ArtifactTransferManifest) -> None:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def put(self, obj: InMemoryDataset, ref: DatasetRef) -> DatasetOpaqueRecordSet:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def unstore(self, refs: Iterable[DatasetRef]) -> None:
         raise NotImplementedError()
 
 
@@ -288,10 +305,10 @@ class Butler(MinimalButler):
     @overload
     def make_new_workspace(
         self,
-        name: str,
         factory: WorkspaceFactory,
         runs: Iterable[CollectionName],
         *,
+        name: str | None = None,
         root: ResourcePathExpression,
     ) -> ExternalWorkspace:
         ...
@@ -299,23 +316,28 @@ class Butler(MinimalButler):
     @overload
     def make_new_workspace(
         self,
-        name: str,
         factory: WorkspaceFactory,
         runs: Iterable[CollectionName],
         *,
+        name: str | None = None,
         root: None = None,
     ) -> InternalWorkspace:
         ...
 
     def make_new_workspace(
         self,
-        name: str,
         factory: WorkspaceFactory,
         runs: Iterable[CollectionName],
         *,
+        name: str | None = None,
         root: ResourcePathExpression | None = None,
     ) -> Workspace:
         runs = frozenset(runs)
+        if name is None:
+            if len(runs) == 1:
+                (name,) = runs
+            else:
+                name = f"u/{getpass.getuser()}/{datetime.now().isoformat()}"
         workspace_id = None
         if root is None:
             # This is an internal workspace.
@@ -333,7 +355,7 @@ class Butler(MinimalButler):
         # persistent state (e.g. to files or a database).
         try:
             workspace, workspace_config = factory(
-                name=name, root=root, workspace_id=workspace_id, parent=self, parent_config=self._config
+                name=name, root=root, workspace_id=workspace_id, parent=self
             )
         except HandledWorkspaceFactoryError as err:
             # An error occurred, but the factory cleaned up its own mess.  We
@@ -372,18 +394,33 @@ class Butler(MinimalButler):
             raise
         return workspace
 
-    def transfer_from(self, origin: Butler, refs: Iterable[DatasetRef]) -> None:
+    def transfer_from(self, origin: Butler, refs: Iterable[DatasetRef], mode: str) -> None:
         refs_by_uuid = {}
         runs = set()
         for ref in refs:
             refs_by_uuid[ref.uuid] = ref
             runs.add(ref.run)
-        name = f"u/{getpass.getuser()}/{datetime.now().isoformat()}"
         workspace = self.make_new_workspace(
-            name,
             factory=ImportWorkspaceFactory(
-                origin._root, origin._datastore, db_only_batch=RawBatch(), transfer_refs=refs
+                origin._root,
+                origin._datastore,
+                db_only_batch=RawBatch(),
+                transfer_refs=refs,
+                transfer_mode=mode,
             ),
             runs=runs,
         )
         workspace.commit()
+
+    def put(self, obj: InMemoryDataset, ref: DatasetRef) -> None:
+        with ResourcePath.temporary_uri(self._config.workspaceTempRoot) as put_root:
+            # We make a trivial *external* workspace to do the put, since that
+            # allows us to do the file artifact write(s) before saving the
+            # records anywhere.
+            workspace = self.make_new_workspace(
+                factory=PutWorkspaceFactory(obj, ref), root=put_root, runs=[ref.run]
+            )
+            # On commit, the PutWorkspace uses an internal ImportWorkspace (as
+            # in transfer_from) to safely put its artifacts into the central
+            # repo.
+            workspace.commit_transfer(transfer="move")

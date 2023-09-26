@@ -118,4 +118,5 @@ class ButlerConfig(pydantic.BaseModel):
     datastore: DatastoreConfig
     storageClasses: dict[str, StorageClassConfig]
     workspaceRoot: ResourcePath
+    workspaceTempRoot: ResourcePath
     workspaceOptions: dict[str, Any]

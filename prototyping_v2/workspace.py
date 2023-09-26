@@ -12,7 +12,7 @@ __all__ = (
 )
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar
 
 import pydantic
 from lsst.resources import ResourcePath
@@ -44,6 +44,9 @@ class InternalWorkspace(Workspace, Protocol):
 
     On commit, an `InternalWorkspace` may perform datastore writes as well
     as reads (e.g., merge small files into larger ones).
+
+    Initializing an internal workspace *may* automatically a parent `Butler`
+    instance if all of its operations require one to work.
     """
 
     def commit(self) -> None:
@@ -59,6 +62,12 @@ class InternalWorkspace(Workspace, Protocol):
 class ExternalWorkspace(Workspace, Protocol):
     """An interface for butler workspace clients that write datastore artifacts
     to locations that are not managed by a registry database.
+
+    Initializing an internal workspace *may not* automatically a parent
+    `Butler` instance, since external workspaces may be abandoned without
+    consulting the parent repository at all.  Instead, parent `Butler` creation
+    should be deferred to `commit_transfer`, and only occur if
+    ``destination=None``.
     """
 
     @property
@@ -86,13 +95,6 @@ class ExternalWorkspace(Workspace, Protocol):
             location prior to commmit by definition.
         """
 
-    def commit_new_repo(self, **kwargs: Any) -> None:
-        """Commit this workspace's contents by creating a new full data
-        repository at its current location.
-
-        Keywords arguments are forwarded to `Butler.makeRepo`.
-        """
-
 
 _W = TypeVar("_W", bound="Workspace", covariant=True)
 
@@ -104,6 +106,7 @@ class WorkspaceExtensionConfig(ExtensionConfig, Generic[_W]):
         root: ResourcePath,
         name: str,
         workspace_id: int | None,
+        parent_root: ResourcePath,
         parent_config: ButlerConfig,
         parent_read_butler: Butler | None = None,
         parent_write_butler: Butler | None = None,
@@ -115,7 +118,8 @@ class WorkspaceExtensionConfig(ExtensionConfig, Generic[_W]):
 class WorkspaceConfig(pydantic.BaseModel, Generic[_W]):
     name: str
     workspace_id: int | None
-    parent: ButlerConfig
+    parent_root: ResourcePath
+    parent_config: ButlerConfig
     extension: WorkspaceExtensionConfig[_W]
 
     FILENAME: ClassVar[str] = "butler-workspace.json"
@@ -131,7 +135,8 @@ class WorkspaceConfig(pydantic.BaseModel, Generic[_W]):
             root,
             self.name,
             self.workspace_id,
-            self.parent,
+            self.parent_root,
+            self.parent_config,
             parent_read_butler=parent_read_butler,
             parent_write_butler=parent_write_butler,
         )
@@ -165,6 +170,5 @@ class WorkspaceFactory(Protocol[_W]):
         root: ResourcePath,
         workspace_id: int | None,
         parent: Butler,
-        parent_config: ButlerConfig,
     ) -> tuple[_W, WorkspaceConfig]:
         ...

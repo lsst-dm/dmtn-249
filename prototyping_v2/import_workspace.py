@@ -97,12 +97,13 @@ class ImportWorkspaceConfig(pydantic.BaseModel, WorkspaceExtensionConfig):
         root: ResourcePath,
         name: str,
         workspace_id: int | None,
+        parent_root: ResourcePath,
         parent_config: ButlerConfig,
         parent_read_butler: Butler | None = None,
         parent_write_butler: Butler | None = None,
     ) -> Workspace:
         if parent_write_butler is None:
-            parent_write_butler = Butler(parent_config, writeable=True)
+            parent_write_butler = Butler(parent_config, parent_root, writeable=True)
         assert workspace_id is not None, "Import workspaces are always internal."
         return ImportWorkspace(
             workspace_id,
@@ -127,11 +128,13 @@ class ImportWorkspaceFactory(WorkspaceFactory[ImportWorkspace]):
         origin: Datastore,
         db_only_batch: RawBatch,
         transfer_refs: Iterable[DatasetRef],
+        transfer_mode: str,
     ):
         self.origin_root = origin_root
         self.origin = origin
         self.db_only_batch = db_only_batch
         self.transfer_refs = transfer_refs
+        self.transfer_mode = transfer_mode
 
     def __call__(
         self,
@@ -139,15 +142,15 @@ class ImportWorkspaceFactory(WorkspaceFactory[ImportWorkspace]):
         root: ResourcePath,
         workspace_id: int | None,
         parent: Butler,
-        parent_config: ButlerConfig,
     ) -> tuple[ImportWorkspace, WorkspaceConfig]:
-        requests = self.origin.make_transfer_requests(self.transfer_refs)
+        requests = self.origin.make_transfer_requests(self.transfer_refs, self.transfer_mode)
         manifest = parent._datastore.receive_transfer_requests(self.transfer_refs, requests, self.origin)
         assert workspace_id is not None, "Import workspaces are always internal."
         workspace_config = WorkspaceConfig(
             name=name,
             workspace_id=workspace_id,
-            parent=parent_config,
+            parent_root=parent._root,
+            parent_config=parent._config,
             extension=ImportWorkspaceConfig(
                 origin_root=self.origin_root,
                 origin_config=self.origin.config,
