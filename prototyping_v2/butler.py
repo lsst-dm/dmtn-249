@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
 import getpass
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from datetime import datetime
-from typing import Any, cast, overload, TypeVar
+from typing import Any, TypeVar, cast, overload
 
-from lsst.daf.butler import DataId, DataIdValue, DimensionUniverse, StorageClass
+from lsst.daf.butler import DataCoordinate, DataId, DataIdValue, DimensionUniverse, StorageClass
 from lsst.resources import ResourcePath, ResourcePathExpression
 
 from .aliases import (
@@ -27,9 +28,11 @@ from .primitives import (
     DatasetType,
     DeferredDatasetHandle,
     OpaqueRecordSet,
+    SignedPermissions,
 )
 from .put_workspace import PutWorkspaceFactory
 from .raw_batch import RawBatch
+from .removal_workspace import RemovalWorkspaceFactory
 from .workspace import (
     CorruptedWorkspaceError,
     ExternalWorkspace,
@@ -47,8 +50,12 @@ class Registry(ABC):
     """
 
     @abstractmethod
+    def expand_data_coordinates(self, data_coordinates: Iterable[DataCoordinate]) -> Iterable[DataCoordinate]:
+        raise NotImplementedError()
+
+    @abstractmethod
     def expand_existing_dataset_refs(
-        self, refs: Iterable[DatasetRef], sign: bool = False
+        self, refs: Iterable[DatasetRef], sign: SignedPermissions
     ) -> Iterable[DatasetRef]:
         raise NotImplementedError()
 
@@ -169,6 +176,13 @@ class Datastore(ABC):
         origin : `Datastore`
             Datastore that owns or at least knows how to read the datasets
             being transferred.
+
+        Returns
+        -------
+        manifest
+            Description of the artifacts to be transferred as interpreted by
+            this datastore.  Embedded destination records may include signed
+            URIs.
         """
         raise NotImplementedError()
 
@@ -176,10 +190,27 @@ class Datastore(ABC):
     def execute_transfer_manifest(
         self, manifest: ArtifactTransferManifest, origin: Datastore
     ) -> OpaqueRecordSet:
+        """Actually execute transfers to this datastore.
+
+        Notes
+        -----
+        The manifest may include signed URIs, but this is not guaranteed and
+        the datastore should be prepared to refresh them if they are absent
+        or expired.
+        """
         raise NotImplementedError()
 
     @abstractmethod
     def abandon_transfer_manifest(self, manifest: ArtifactTransferManifest) -> None:
+        """Delete artifacts from a manifest that has been partially
+        transferred.
+
+        Notes
+        -----
+        The manifest may include signed URIs, but this is not guaranteed and
+        the datastore should be prepared to refresh them if they are absent
+        or expired.
+        """
         raise NotImplementedError()
 
     @abstractmethod
@@ -199,6 +230,12 @@ class Datastore(ABC):
         -------
         records : `DatasetOpaqueRecordSet`
             Records needed by the datastore in order to read the dataset.
+
+        Notes
+        -----
+        The fact that no signed URIs are passed here enshrines the idea that a
+        signed-URI datastore will always need to be able to go get them itself,
+        at least for writes.
         """
         raise NotImplementedError()
 
@@ -206,16 +243,19 @@ class Datastore(ABC):
     def unstore(self, refs: Iterable[DatasetRef]) -> None:
         """Remove all stored artifacts associated with the given datasets.
 
+        Notes
+        -----
         Artifacts that do not exist should be silently ignored - that allows
-        this method to be called to clean up after an interrupted operation
-        has left artifacts in an unexpected state.
+        this method to be called to clean up after an interrupted operation has
+        left artifacts in an unexpected state.
 
         The given `DatasetRef` object may or may not have opaque records
         attached, and if records are attached, they may or may not have signed
         URIs (though if signed URIs are attached, they are guaranteed to be
-        signed for delete and existence-check operations).  If no records are
-        attached implementations may assume that they would be the same as
-        would be returned by calling `put` on these refs.
+        signed for delete and existence-check operations), and signed URIs may
+        need to be refreshed.  If no records are attached implementations may
+        assume that they would be the same as would be returned by calling
+        `put` on these refs.
         """
         raise NotImplementedError()
 
@@ -294,7 +334,7 @@ class Butler(MinimalButler):
         for ref, parameters_for_ref in arg:
             parameters.append(parameters_for_ref)
             refs.append(ref)
-        expanded_refs = self._registry.expand_existing_dataset_refs(refs, sign=True)
+        expanded_refs = self._registry.expand_existing_dataset_refs(refs, sign=SignedPermissions.GET)
         return self._datastore.get_many(zip(list(expanded_refs), parameters))
 
     @overload
@@ -341,7 +381,7 @@ class Butler(MinimalButler):
         for ref, parameters_for_ref in arg:
             parameters.append(parameters_for_ref)
             refs.append(ref)
-        expanded_refs = self._registry.expand_existing_dataset_refs(refs, sign=True)
+        expanded_refs = self._registry.expand_existing_dataset_refs(refs, sign=SignedPermissions.GET)
         return [
             (ref, parameters_for_ref, DeferredDatasetHandle(ref, self._datastore))
             for ref, parameters_for_ref in zip(expanded_refs, parameters)
@@ -447,9 +487,10 @@ class Butler(MinimalButler):
         return workspace
 
     def transfer_from(self, origin: Butler, refs: Iterable[DatasetRef], mode: str) -> None:
+        assert mode != "move", "Moves are not supported for datasets managed by another repo."
         refs_by_uuid = {}
         runs = set()
-        for ref in refs:
+        for ref in origin._registry.expand_existing_dataset_refs(refs, sign=SignedPermissions.GET):
             refs_by_uuid[ref.uuid] = ref
             runs.add(ref.run)
         workspace = self.make_new_workspace(
@@ -465,10 +506,26 @@ class Butler(MinimalButler):
         workspace.commit()
 
     def put(self, obj: InMemoryDataset, ref: DatasetRef) -> None:
+        (data_id,) = self._registry.expand_data_coordinates([ref.data_id])
+        ref = dataclasses.replace(ref, data_id=data_id)
         workspace = self.make_new_workspace(factory=PutWorkspaceFactory(ref), runs=[ref.run])
         try:
             workspace.put(obj)
         except BaseException:
             workspace.abandon()
             raise
+        workspace.commit()
+
+    def unstore_datasets(
+        self,
+        refs: Iterable[DatasetRef],
+    ) -> None:
+        refs_by_uuid = {}
+        runs = set()
+        for ref in self._registry.expand_existing_dataset_refs(
+            refs, sign=(SignedPermissions.DELETE | SignedPermissions.GET)
+        ):
+            refs_by_uuid[ref.uuid] = ref
+            runs.add(ref.run)
+        workspace = self.make_new_workspace(factory=RemovalWorkspaceFactory(refs_by_uuid.values()), runs=runs)
         workspace.commit()

@@ -12,7 +12,7 @@ from lsst.resources import ResourcePath
 from .aliases import InMemoryDataset
 from .config import ButlerConfig
 from .primitives import DatasetRef
-from .raw_batch import RawBatch, DatasetInsertion
+from .raw_batch import DatasetInsertion, RawBatch
 from .workspace import (
     InternalWorkspace,
     Workspace,
