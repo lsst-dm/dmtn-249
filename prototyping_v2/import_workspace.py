@@ -21,7 +21,8 @@ from .workspace import (
 )
 
 if TYPE_CHECKING:
-    from .butler import Butler, Datastore, TransferManifest
+    from .artifact_transfer import ArtifactTransferManifest
+    from .butler import Butler, Datastore
 
 
 class ImportWorkspace(InternalWorkspace):
@@ -41,7 +42,7 @@ class ImportWorkspace(InternalWorkspace):
         self,
         workspace_id: int,
         db_only_batch: RawBatch,
-        manifest: TransferManifest,
+        manifest: ArtifactTransferManifest,
         parent: Butler,
         origin: Datastore,
     ):
@@ -89,7 +90,7 @@ class ImportWorkspaceConfig(pydantic.BaseModel, WorkspaceExtensionConfig):
     origin_root: ResourcePath
     origin_config: DatastoreConfig
     db_only_batch: RawBatch
-    manifest: TransferManifest  # TODO: need pydantic magic for importing derived type
+    manifest: ArtifactTransferManifest
 
     def make_client(
         self,

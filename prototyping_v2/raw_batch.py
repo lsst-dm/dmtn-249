@@ -17,13 +17,7 @@ if TYPE_CHECKING:
         OpaqueTableName,
         StorageClassName,
     )
-    from .primitives import (
-        DatasetRef,
-        DatasetType,
-        OpaqueRecordSet,
-        DimensionGroup,
-        RepoValidationContext,
-    )
+    from .primitives import DatasetRef, DatasetType, DimensionGroup, OpaqueRecordSet, RepoValidationContext
 
 
 @final

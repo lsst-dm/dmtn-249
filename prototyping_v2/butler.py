@@ -6,11 +6,8 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any, cast, overload
 
-import pydantic
 from lsst.daf.butler import DataId, DataIdValue, DimensionUniverse, StorageClass
 from lsst.resources import ResourcePath, ResourcePathExpression
-from lsst.utils.doImport import doImportType
-from lsst.utils.introspection import get_full_type_name
 
 from .aliases import (
     CollectionName,
@@ -20,17 +17,12 @@ from .aliases import (
     InMemoryDataset,
     WorkspaceName,
 )
+from .artifact_transfer import ArtifactTransferManifest, ArtifactTransferRequest
 from .config import ButlerConfig, DatastoreConfig
 from .import_workspace import ImportWorkspaceFactory
 from .minimal_butler import MinimalButler
-from .primitives import (
-    OpaqueRecordSet,
-    DatasetRef,
-    DatasetType,
-    DeferredDatasetHandle,
-)
+from .primitives import DatasetRef, DatasetType, DeferredDatasetHandle, OpaqueRecordSet
 from .raw_batch import RawBatch
-from .transfers import ArtifactTransferRequest
 from .workspace import (
     CorruptedWorkspaceError,
     ExternalWorkspace,
@@ -89,37 +81,6 @@ class Registry(ABC):
         raise NotImplementedError()
 
 
-class TransferManifest(pydantic.BaseModel, ABC):
-    """A serializable Datastore-specific description of datasets to be
-    transferred into that Datastore.
-    """
-
-    type_name: str
-    """Fully-qualified Python type for this `TransferManifest` subclass.
-
-    This is populated automatically by the constructor and stored in this
-    attribute to make sure it is automatically saved to disk.
-    """
-
-    def __init__(self, **kwargs: Any) -> None:
-        type_name = kwargs.pop("type_name", None)
-        assert type_name is None or doImportType(type_name) is type(self)
-        super().__init__(type_name=get_full_type_name(self), **kwargs)
-
-    @staticmethod
-    def from_mapping(mapping: Mapping[str, Any]) -> TransferManifest:
-        """Reconstruct this manifest from a JSON-friendly mapping."""
-        cls: type[TransferManifest] = doImportType(mapping["type_name"])
-        return cls.model_validate(mapping)
-
-    @abstractmethod
-    def extract_refs(self) -> Iterable[DatasetRef]:
-        """Return the transferred `DatasetRef` objects, including opaque
-        records.
-        """
-        raise NotImplementedError()
-
-
 class Datastore(ABC):
     """Interface for butler component that stores dataset contents."""
 
@@ -165,7 +126,7 @@ class Datastore(ABC):
     @abstractmethod
     def receive_transfer_requests(
         self, refs: Iterable[DatasetRef], requests: Iterable[ArtifactTransferRequest], origin: Datastore
-    ) -> TransferManifest:
+    ) -> ArtifactTransferManifest:
         """Create a manifest that records how this datastore would receive the
         given artifacts from another datastore.
 
@@ -185,11 +146,13 @@ class Datastore(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def execute_transfer_manifest(self, manifest: TransferManifest, origin: Datastore) -> OpaqueRecordSet:
+    def execute_transfer_manifest(
+        self, manifest: ArtifactTransferManifest, origin: Datastore
+    ) -> OpaqueRecordSet:
         raise NotImplementedError()
 
     @abstractmethod
-    def abandon_transfer_manifest(self, manifest: TransferManifest) -> None:
+    def abandon_transfer_manifest(self, manifest: ArtifactTransferManifest) -> None:
         raise NotImplementedError()
 
 

@@ -4,22 +4,15 @@ import dataclasses
 import enum
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Hashable, Mapping, Set, Iterable
-from typing import TYPE_CHECKING, Any, Iterator, final, Self, NewType
+from collections.abc import Iterable, Mapping, Set
+from typing import TYPE_CHECKING, Any, Iterator, NewType, Self, final
 
 import pydantic
+from lsst.daf.butler import DataCoordinate, DimensionUniverse, StorageClass
+from lsst.resources import ResourcePath
 from pydantic_core import core_schema
 
-from lsst.daf.butler import DataCoordinate, StorageClass, DimensionUniverse
-from lsst.resources import ResourcePath
-
-from .aliases import (
-    CollectionName,
-    DatasetTypeName,
-    DimensionName,
-    OpaqueTableName,
-    StorageClassName,
-)
+from .aliases import CollectionName, DatasetTypeName, DimensionName, OpaqueTableName, StorageClassName
 
 if TYPE_CHECKING:
     from .butler import Datastore
@@ -88,24 +81,21 @@ class OpaqueRecordSet(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def extract_files(self) -> dict[Hashable, tuple[ResourcePath, Checksum | None]]:
+    def extract_files(self) -> dict[ResourcePath, Checksum | None]:
         """Return any URIs embedded in these records that may need to be
         signed.
 
         Returns
         -------
-        uris : `dict` [ `~collections.abc.Hashable`, \
-                `tuple` [ `~lsst.resources.ResourcePath`, `Checksum` | `None` \
-                    ] ]
+        uris : `dict` [ `~lsst.resources.ResourcePath`, `Checksum` | `None` ]
             Unsigned URIs embedded in these records and their checksums, if
-            known.  Key interpretation is datastore-specific and opaque the
-            caller.
+            known.
         """
         raise NotImplementedError()
 
     @abstractmethod
     def add_signed_uris(
-        self, permissions: SignedPermissions, signed: Mapping[Hashable, ResourcePath]
+        self, permissions: SignedPermissions, signed: Mapping[ResourcePath, ResourcePath]
     ) -> None:
         """Add the given signed URIs to this object.
 
@@ -113,10 +103,9 @@ class OpaqueRecordSet(ABC):
         ----------
         permissions : `SignedPermissions`
             Operations the signed URIs support.
-        signed : `~collections.abc.Mapping` [ `~collections.abc.Hashable`, \
+        signed : `~collections.abc.Mapping` [ `~lsst.resources.ResourcePath`, \
                 `~lsst.resources.ResourcePath` ]
-            Signed URIs with the same keys as the unsigned-URI mapping returned
-            by `extract_files`.
+            Mapping from unsigned URI to its signed counterpart.
         """
         raise NotImplementedError()
 
@@ -184,11 +173,11 @@ class EmptyOpaqueRecordSet(OpaqueRecordSet):
     def to_json_data(self) -> Any:
         return {}
 
-    def extract_files(self) -> dict[Hashable, tuple[ResourcePath, Checksum | None]]:
+    def extract_files(self) -> dict[ResourcePath, Checksum | None]:
         return {}
 
     def add_signed_uris(
-        self, permissions: SignedPermissions, signed: Mapping[Hashable, ResourcePath]
+        self, permissions: SignedPermissions, signed: Mapping[ResourcePath, ResourcePath]
     ) -> None:
         assert not signed
 
@@ -276,6 +265,9 @@ class DatasetType:
 
     @property
     def storage_class(self) -> StorageClass:
+        raise NotImplementedError("TODO")
+
+    def override_storage_class(self, storage_class: StorageClass | StorageClassName) -> DatasetType:
         raise NotImplementedError("TODO")
 
 
