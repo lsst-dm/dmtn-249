@@ -3,18 +3,18 @@ from __future__ import annotations
 __all__ = ("PutWorkspace", "PutWorkspaceFactory", "PutWorkspaceConfig")
 
 
+import json
 from typing import TYPE_CHECKING, Any, Self
 
 import pydantic
 from lsst.resources import ResourcePath
 
 from .aliases import InMemoryDataset
-from .config import ButlerConfig, DatastoreConfig
-from .import_workspace import ImportWorkspaceFactory
+from .config import ButlerConfig
 from .primitives import DatasetRef
-from .raw_batch import RawBatch
+from .raw_batch import RawBatch, DatasetInsertion
 from .workspace import (
-    ExternalWorkspace,
+    InternalWorkspace,
     Workspace,
     WorkspaceConfig,
     WorkspaceExtensionConfig,
@@ -25,68 +25,69 @@ if TYPE_CHECKING:
     from .butler import Butler, Datastore
 
 
-class PutWorkspace(ExternalWorkspace):
+class PutWorkspace(InternalWorkspace):
     def __init__(
         self,
+        workspace_id: int,
         root: ResourcePath,
         ref: DatasetRef,
         datastore: Datastore,
-        parent: Butler | None,
+        parent_root: ResourcePath,
         parent_config: ButlerConfig,
+        parent_butler: Butler | None,
     ):
+        self._workspace_id = workspace_id
         self._root = root
         self._ref = ref
         self._datastore = datastore
+        self._parent_root = parent_root
         self._parent_config = parent_config
-        self._parent = parent
+        self._parent_butler = parent_butler
 
-    @property
-    def root(self) -> ResourcePath:
-        return self._root
+    def put(self, obj: InMemoryDataset) -> None:
+        records = self._datastore.put(obj, self._ref)
+        with self._root.join("records.json").open("w") as stream:
+            json.dump(records.to_json_data(), stream)
 
     def abandon(self) -> None:
-        # Telling the datastore to unstore the ref is probably unnecessary,
-        # given that we're going to blow away the whole directory, but
-        # Datastore.unstore is required to silently ignore refs that are
-        # already not stored.
+        if self._parent_butler is None:
+            self._parent_butler = Butler(self._parent_config, self._parent_root, writeable=True)
+        records_uri = self._root.join("records.json")
+        if records_uri.exists():
+            records_uri.remove()
         self._datastore.unstore([self._ref])
-        # Recursively delete everything.  This includes at least the config
-        # file.
-        for dirpath, _, filenames in self._root.walk():
-            for filename in filenames:
-                dirpath.join(filename).remove()
-        # Need to do this for POSIX, which has real directories.  We need it to
-        # be a non-error for URI schemes that do not have real directories, at
-        # least when there are no artifacts under that root.
-        self._root.remove()
+        self._destroy()
+        self._parent_butler._registry.delete_workspace(self._workspace_id)
 
-    def commit_transfer(self, transfer: str = "auto", destination: Butler | None = None) -> None:
-        if destination is None:
-            destination = self._parent
-            if destination is None:
-                destination = Butler(self._parent_config, writeable=True)
-        # Make an *internal* workspace to transfer this *external* workspace's
-        # artifact to.
-        import_workspace = destination.make_new_workspace(
-            factory=ImportWorkspaceFactory(
-                self._root,
-                self._datastore,
-                db_only_batch=RawBatch(),
-                transfer_refs=[self._ref],
-                transfer_mode=transfer,
-            ),
-            runs=[self._ref.run],
-        )
-        import_workspace.commit()
-        self.abandon()
+    def commit(self) -> None:
+        if self._parent_butler is None:
+            self._parent_butler = Butler(self._parent_config, self._parent_root, writeable=True)
+        batch = RawBatch()
+        batch.dataset_insertions[self._ref.run] = {
+            self._ref.dataset_type.name: [
+                DatasetInsertion(uuid=self._ref.uuid, data_coordinate_values=self._ref.data_id.values_tuple())
+            ]
+        }
+        with self._root.join("records.json").open("r") as stream:
+            record_data = json.load(stream)
+        batch.opaque_table_insertions = self._datastore.opaque_record_set_type.from_json_data(record_data)
+        self._parent_butler._registry.execute_batch(batch)
+        records_uri = self._root.join("records.json")
+        if records_uri.exists():
+            records_uri.remove()
+        self._destroy()
+        self._parent_butler._registry.delete_workspace(self._workspace_id)
 
-    def commit_new_repo(self, **kwargs: Any) -> None:
-        raise NotImplementedError("TODO: Make new repo, call commit_transfer.  Or just disable this method.")
+    def _destroy(self) -> None:
+        """Delete all persistent artifacts associated with this workspace,
+        including its configuration file, the saved transfer manifest, and
+        the saved description of DB-only operations to perform.
+        """
+        raise NotImplementedError("TODO")
 
 
 class PutWorkspaceConfig(pydantic.BaseModel, WorkspaceExtensionConfig):
     ref: DatasetRef
-    datastore_config: DatastoreConfig
 
     def make_client(
         self,
@@ -98,8 +99,17 @@ class PutWorkspaceConfig(pydantic.BaseModel, WorkspaceExtensionConfig):
         parent_read_butler: Butler | None = None,
         parent_write_butler: Butler | None = None,
     ) -> Workspace:
+        assert workspace_id is not None, "Put workspaces are always internal."
+        if parent_write_butler is None:
+            datastore = parent_config.datastore.make_datastore(parent_root)
         return PutWorkspace(
-            root, self.ref, self.datastore_config.make_datastore(root), parent_write_butler, parent_config
+            workspace_id,
+            root=root,
+            ref=self.ref,
+            datastore=datastore,
+            parent_root=parent_root,
+            parent_config=parent_config,
+            parent_butler=parent_write_butler,
         )
 
     @classmethod
@@ -111,8 +121,7 @@ class PutWorkspaceConfig(pydantic.BaseModel, WorkspaceExtensionConfig):
 
 
 class PutWorkspaceFactory(WorkspaceFactory[PutWorkspace]):
-    def __init__(self, obj: InMemoryDataset, ref: DatasetRef):
-        self.obj = obj
+    def __init__(self, ref: DatasetRef):
         self.ref = ref
 
     def __call__(
@@ -122,18 +131,12 @@ class PutWorkspaceFactory(WorkspaceFactory[PutWorkspace]):
         workspace_id: int | None,
         parent: Butler,
     ) -> tuple[PutWorkspace, WorkspaceConfig]:
-        assert workspace_id is None, "Put workspaces are always external."
-        if "put_datastore" not in parent._config.workspaceOptions:
-            raise RuntimeError("No datastore configured for external 'put' operations in this repo.")
-        datastore_config: DatastoreConfig = parent._config.workspaceOptions["put_datastore"]
-        datastore = datastore_config.make_datastore(root)
-        self.ref._opaque_records = datastore.put(self.obj, self.ref)
         workspace_config = WorkspaceConfig(
             name=name,
             workspace_id=workspace_id,
             parent_root=parent._root,
             parent_config=parent._config,
-            extension=PutWorkspaceConfig(ref=self.ref, datastore_config=datastore_config),
+            extension=PutWorkspaceConfig(ref=self.ref),
         )
         workspace = workspace_config.make_client(root, parent_write_butler=parent)
         return workspace, workspace_config

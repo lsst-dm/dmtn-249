@@ -4,7 +4,7 @@ import getpass
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from datetime import datetime
-from typing import Any, cast, overload
+from typing import Any, cast, overload, TypeVar
 
 from lsst.daf.butler import DataId, DataIdValue, DimensionUniverse, StorageClass
 from lsst.resources import ResourcePath, ResourcePathExpression
@@ -77,6 +77,19 @@ class Registry(ABC):
         raise NotImplementedError()
 
     @abstractmethod
+    def get_active_workspaces(self) -> list[tuple[str, int]]:
+        """Return the names and IDs of all active internal workspaces that
+        the current user has write access to.
+
+        Notes
+        -----
+        Administrators are expected to use this to check that there are no
+        active internal workspaces before any migration or change to central
+        datastore configuration.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
     def execute_batch(self, batch: RawBatch) -> None:
         """Perform registry write operations within a single transaction.
 
@@ -94,6 +107,11 @@ class Datastore(ABC):
     config: DatastoreConfig
     """Configuration that can be used to reconstruct this datastore.
     """
+
+    @property
+    @abstractmethod
+    def opaque_record_set_type(self) -> type[OpaqueRecordSet]:
+        raise NotImplementedError()
 
     @abstractmethod
     def get_many(
@@ -166,11 +184,45 @@ class Datastore(ABC):
 
     @abstractmethod
     def put(self, obj: InMemoryDataset, ref: DatasetRef) -> DatasetOpaqueRecordSet:
+        """Write an in-memory object to this datastore.
+
+        Parameters
+        ----------
+        obj
+            Object to write.
+        ref : `DatasetRef`
+            Metadata used to identify the persisted object.  This should not
+            have opaque records attached when passed, and [if we make
+            DatasetRef mutable] it should have them attached on return.
+
+        Returns
+        -------
+        records : `DatasetOpaqueRecordSet`
+            Records needed by the datastore in order to read the dataset.
+        """
         raise NotImplementedError()
 
     @abstractmethod
     def unstore(self, refs: Iterable[DatasetRef]) -> None:
+        """Remove all stored artifacts associated with the given datasets.
+
+        Artifacts that do not exist should be silently ignored - that allows
+        this method to be called to clean up after an interrupted operation
+        has left artifacts in an unexpected state.
+
+        The given `DatasetRef` object may or may not have opaque records
+        attached, and if records are attached, they may or may not have signed
+        URIs (though if signed URIs are attached, they are guaranteed to be
+        signed for delete and existence-check operations).  If no records are
+        attached implementations may assume that they would be the same as
+        would be returned by calling `put` on these refs.
+        """
         raise NotImplementedError()
+
+
+_W = TypeVar("_W", bound=Workspace, covariant=True)
+_IW = TypeVar("_IW", bound=InternalWorkspace, covariant=True)
+_EW = TypeVar("_EW", bound=ExternalWorkspace, covariant=True)
 
 
 class Butler(MinimalButler):
@@ -305,33 +357,33 @@ class Butler(MinimalButler):
     @overload
     def make_new_workspace(
         self,
-        factory: WorkspaceFactory,
+        factory: WorkspaceFactory[_EW],
         runs: Iterable[CollectionName],
         *,
         name: str | None = None,
         root: ResourcePathExpression,
-    ) -> ExternalWorkspace:
+    ) -> _EW:
         ...
 
     @overload
     def make_new_workspace(
         self,
-        factory: WorkspaceFactory,
+        factory: WorkspaceFactory[_IW],
         runs: Iterable[CollectionName],
         *,
         name: str | None = None,
         root: None = None,
-    ) -> InternalWorkspace:
+    ) -> _IW:
         ...
 
     def make_new_workspace(
         self,
-        factory: WorkspaceFactory,
+        factory: WorkspaceFactory[_W],
         runs: Iterable[CollectionName],
         *,
         name: str | None = None,
         root: ResourcePathExpression | None = None,
-    ) -> Workspace:
+    ) -> _W:
         runs = frozenset(runs)
         if name is None:
             if len(runs) == 1:
@@ -413,14 +465,10 @@ class Butler(MinimalButler):
         workspace.commit()
 
     def put(self, obj: InMemoryDataset, ref: DatasetRef) -> None:
-        with ResourcePath.temporary_uri(self._config.workspaceTempRoot) as put_root:
-            # We make a trivial *external* workspace to do the put, since that
-            # allows us to do the file artifact write(s) before saving the
-            # records anywhere.
-            workspace = self.make_new_workspace(
-                factory=PutWorkspaceFactory(obj, ref), root=put_root, runs=[ref.run]
-            )
-            # On commit, the PutWorkspace uses an internal ImportWorkspace (as
-            # in transfer_from) to safely put its artifacts into the central
-            # repo.
-            workspace.commit_transfer(transfer="move")
+        workspace = self.make_new_workspace(factory=PutWorkspaceFactory(ref), runs=[ref.run])
+        try:
+            workspace.put(obj)
+        except BaseException:
+            workspace.abandon()
+            raise
+        workspace.commit()
