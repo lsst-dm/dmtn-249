@@ -3,7 +3,8 @@ from __future__ import annotations
 import dataclasses
 import getpass
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Set
+from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Any, TypeVar, cast, overload
 
@@ -11,16 +12,19 @@ from lsst.daf.butler import DataCoordinate, DataId, DataIdValue, DimensionUniver
 from lsst.resources import ResourcePath, ResourcePathExpression
 
 from .aliases import (
+    ColumnName,
     CollectionName,
     CollectionPattern,
     DatasetTypeName,
     GetParameter,
     InMemoryDataset,
-    WorkspaceName,
+    OpaqueTableName,
+    ArtifactTransactionID,
+    ArtifactTransactionName,
 )
 from .artifact_transfer import ArtifactTransferManifest, ArtifactTransferRequest
 from .config import ButlerConfig, DatastoreConfig
-from .import_workspace import ImportWorkspaceFactory
+from .import_transaction import ImportTransaction
 from .minimal_butler import MinimalButler
 from .primitives import (
     DatasetOpaqueRecordSet,
@@ -30,18 +34,9 @@ from .primitives import (
     OpaqueRecordSet,
     SignedPermissions,
 )
-from .put_workspace import PutWorkspaceFactory
 from .raw_batch import RawBatch
-from .removal_workspace import RemovalWorkspaceFactory
-from .workspace import (
-    CorruptedWorkspaceError,
-    ExternalWorkspace,
-    HandledWorkspaceFactoryError,
-    InternalWorkspace,
-    Workspace,
-    WorkspaceConfig,
-    WorkspaceFactory,
-)
+from .removal_transaction import RemovalTransaction
+from .transactions import ArtifactTransactionManager
 
 
 class Registry(ABC):
@@ -60,50 +55,65 @@ class Registry(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def insert_workspace(self, name: WorkspaceName, runs: Iterable[CollectionName]) -> int:
-        """Record an internal workspace's existence with the registry.
-
-        Parameters
-        ----------
-        name
-            Name of the workspace.  Should be prefixed with ``u/$USER`` for
-            regular users.
-        runs
-            `~CollectionType.RUN` collections whose dataset storage file
-            artifacts may be modified by this workspace. No other workspace may
-            target the any of these collections until this workspace is
-            committed or abandoned.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def delete_workspace(self, workspace_id: int) -> None:
-        """Delete the given workspace, certifying that registry state is now
-        consistent with any file artifacts it manages.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def get_active_workspaces(self) -> list[tuple[str, int]]:
-        """Return the names and IDs of all active internal workspaces that
-        the current user has write access to.
-
-        Notes
-        -----
-        Administrators are expected to use this to check that there are no
-        active internal workspaces before any migration or change to central
-        datastore configuration.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def execute_batch(self, batch: RawBatch) -> None:
-        """Perform registry write operations within a single transaction.
+    def execute_batch(self, batch: RawBatch, artifact_transaction_id: ArtifactTransactionID | None) -> None:
+        """Perform registry write operations within a single database
+        transaction.
 
         Parameters
         ----------
         batch : `RawBatch`
             Serializable description of the operations to be performed.
+        artifact_transaction_id : `int` or `None`, optional
+            ID of an active artifact transaction that is being committed.  This
+            must be provided if `batch.opaque_table_insertions` is not `None`.
+            This artifact transaction is deleted as part of the transaction.
+
+        Returns
+        -------
+        The registry http API should either not accept
+        ``artifact_transaction_id`` at all or require special user permissions;
+        it should only be passed by an implementation of
+        `ArtifactTransactionManager.commit`, and science users should only be
+        interacting with a client/server implementation of that that calls this
+        registry method on the server.
+
+        The registry is not responsible for checking that the batch's contents
+        correspond to the runs locked by the artifact transaction; this is the
+        transaction manager's job.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def open_artifact_ransaction(
+        self,
+        name: ArtifactTransactionName,
+        runs: Iterable[CollectionName],
+        opaque_record_deletions: Mapping[OpaqueTableName, tuple[ColumnName, Set[Any]]],
+    ) -> ArtifactTransactionID:
+        """Insert rows representing an artifact transaction and optionally
+        delete opaque records that transaction will take ownership of.
+
+        Notes
+        -----
+        The registry http API should either not support this method at all or
+        require special user permissions; it should only be passed by an
+        implementation of `ArtifactTransactionManager.open`, and science
+        users should only be interacting with a client/server implementation of
+        that that calls this registry method on the server.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def abandon_artifact_transaction(self, artifact_transaction_id: ArtifactTransactionID) -> None:
+        """Delete rows that represent an artifact transaction.
+
+        Notes
+        -----
+        The registry http API should either not support this method at all or
+        require special user permissions; it should only be passed by an
+        implementation of `ArtifactTransactionManager.abandon`, and science
+        users should only be interacting with a client/server implementation of
+        that that calls this registry method on the server.
         """
         raise NotImplementedError()
 
@@ -259,10 +269,15 @@ class Datastore(ABC):
         """
         raise NotImplementedError()
 
+    @abstractmethod
+    def verify(self, ref: DatasetRef) -> bool:
+        """Test whether all artifacts are present for a dataset.
 
-_W = TypeVar("_W", bound=Workspace, covariant=True)
-_IW = TypeVar("_IW", bound=InternalWorkspace, covariant=True)
-_EW = TypeVar("_EW", bound=ExternalWorkspace, covariant=True)
+        If all artifacts are present and all checksums embedded in records are
+        are correct, return `True`.  If no artifacts are present, return
+        `False`.  If only some artifacts are present or checksums fail, raise.
+        """
+        raise NotImplementedError()
 
 
 class Butler(MinimalButler):
@@ -275,6 +290,7 @@ class Butler(MinimalButler):
     _config: ButlerConfig
     _registry: Registry
     _datastore: Datastore
+    _transaction_manager: ArtifactTransactionManager
 
     @property
     def dimensions(self) -> DimensionUniverse:
@@ -389,102 +405,10 @@ class Butler(MinimalButler):
 
     ###########################################################################
     #
-    # Workspace stuff, including transfers to demonstrate workspace usage.
-    # These are pedagogical pale shadows of the real thing.
+    # Writes operations that demonstrate transactions. These are pedagogical
+    # pale shadows of the real thing.
     #
     ###########################################################################
-
-    @overload
-    def make_new_workspace(
-        self,
-        factory: WorkspaceFactory[_EW],
-        runs: Iterable[CollectionName],
-        *,
-        name: str | None = None,
-        root: ResourcePathExpression,
-    ) -> _EW:
-        ...
-
-    @overload
-    def make_new_workspace(
-        self,
-        factory: WorkspaceFactory[_IW],
-        runs: Iterable[CollectionName],
-        *,
-        name: str | None = None,
-        root: None = None,
-    ) -> _IW:
-        ...
-
-    def make_new_workspace(
-        self,
-        factory: WorkspaceFactory[_W],
-        runs: Iterable[CollectionName],
-        *,
-        name: str | None = None,
-        root: ResourcePathExpression | None = None,
-    ) -> _W:
-        runs = frozenset(runs)
-        if name is None:
-            if len(runs) == 1:
-                (name,) = runs
-            else:
-                name = f"u/{getpass.getuser()}/{datetime.now().isoformat()}"
-        workspace_id = None
-        if root is None:
-            # This is an internal workspace.
-            root = self._config.workspaceRoot.join(name)
-            # For internal workspaces, we insert a row identifying the
-            # workspace into a database table before it is actually created,
-            # and fail if such a row already exists.  This is effectively a
-            # per-name concurrency lock on the creation of workspaces.
-            workspace_id = self._registry.insert_workspace(name, runs=runs)
-        else:
-            # This is an external workspace.
-            root = ResourcePath(root, forceDirectory=True)
-        config_uri = root.join(WorkspaceConfig.FILENAME.format(name))
-        # Delegate to the factory object to do most of the work.  This writes
-        # persistent state (e.g. to files or a database).
-        try:
-            workspace, workspace_config = factory(
-                name=name, root=root, workspace_id=workspace_id, parent=self
-            )
-        except HandledWorkspaceFactoryError as err:
-            # An error occurred, but the factory cleaned up its own mess.  We
-            # can remove the record of the workspace from the database and
-            # just re-raise the original exception.
-            if workspace_id is not None:
-                self._registry.delete_workspace(workspace_id)
-            raise cast(BaseException, err.__cause__)
-        except BaseException as err:
-            # An error occurred and the factory cannot guarantee anything about
-            # the persistent state.  Make it clear that administrative action
-            # is needed.
-            #
-            # Note that this state is recognizable for internal workspaces from
-            # the existence of a central database row for the workspace and the
-            # absence of a config file, and that the database row needs to be
-            # deleted for an administrator to mark it as cleaned up.  For
-            # external workspaces we expect the user to just 'rm -rf' (or
-            # equivalent) the workspace directory.
-            raise CorruptedWorkspaceError(
-                f"New workspace {name} with root {root} was corrupted during construction."
-            ) from err
-        try:
-            # Save a configuration file for the workspace to allow the
-            # WorkspaceButler to be reconstructed without the full Butler in
-            # the future.
-            with config_uri.open("w") as stream:
-                stream.write(workspace_config.model_dump_json())
-        except BaseException:
-            # If we fail here, try to clean up.
-            workspace.abandon()
-            # Successfully cleaned up workspace persistent state, try to remove
-            # from database as well if this is an internal workspace.
-            if workspace_id is not None:
-                self._registry.delete_workspace(workspace_id)
-            raise
-        return workspace
 
     def transfer_from(self, origin: Butler, refs: Iterable[DatasetRef], mode: str) -> None:
         assert mode != "move", "Moves are not supported for datasets managed by another repo."
@@ -493,28 +417,18 @@ class Butler(MinimalButler):
         for ref in origin._registry.expand_existing_dataset_refs(refs, sign=SignedPermissions.GET):
             refs_by_uuid[ref.uuid] = ref
             runs.add(ref.run)
-        workspace = self.make_new_workspace(
-            factory=ImportWorkspaceFactory(
-                origin._root,
-                origin._datastore,
-                db_only_batch=RawBatch(),
-                transfer_refs=refs,
-                transfer_mode=mode,
+        requests = origin._datastore.make_transfer_requests(refs_by_uuid.values(), mode)
+        manifest = self._datastore.receive_transfer_requests(
+            refs_by_uuid.values(), requests, origin._datastore
+        )
+        transaction_id = self._transaction_manager.open(
+            ImportTransaction,
+            data=ImportTransaction.make_header_data(
+                RawBatch(), manifest, origin._root, origin._config.datastore
             ),
             runs=runs,
         )
-        workspace.commit()
-
-    def put(self, obj: InMemoryDataset, ref: DatasetRef) -> None:
-        (data_id,) = self._registry.expand_data_coordinates([ref.data_id])
-        ref = dataclasses.replace(ref, data_id=data_id)
-        workspace = self.make_new_workspace(factory=PutWorkspaceFactory(ref), runs=[ref.run])
-        try:
-            workspace.put(obj)
-        except BaseException:
-            workspace.abandon()
-            raise
-        workspace.commit()
+        self._transaction_manager.commit(transaction_id)
 
     def unstore_datasets(
         self,
@@ -522,10 +436,12 @@ class Butler(MinimalButler):
     ) -> None:
         refs_by_uuid = {}
         runs = set()
-        for ref in self._registry.expand_existing_dataset_refs(
-            refs, sign=(SignedPermissions.DELETE | SignedPermissions.GET)
-        ):
+        for ref in self._registry.expand_existing_dataset_refs(refs, sign=SignedPermissions.NONE):
             refs_by_uuid[ref.uuid] = ref
             runs.add(ref.run)
-        workspace = self.make_new_workspace(factory=RemovalWorkspaceFactory(refs_by_uuid.values()), runs=runs)
-        workspace.commit()
+        transaction_id = self._transaction_manager.open(
+            RemovalTransaction,
+            data=RemovalTransaction(refs=refs_by_uuid).model_dump(),
+            runs=runs,
+        )
+        self._transaction_manager.abandon(transaction_id)

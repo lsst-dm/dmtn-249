@@ -12,7 +12,14 @@ from lsst.daf.butler import DataCoordinate, DimensionUniverse, StorageClass
 from lsst.resources import ResourcePath
 from pydantic_core import core_schema
 
-from .aliases import CollectionName, DatasetTypeName, DimensionName, OpaqueTableName, StorageClassName
+from .aliases import (
+    CollectionName,
+    DatasetTypeName,
+    DimensionName,
+    OpaqueTableName,
+    StorageClassName,
+    ColumnName,
+)
 
 if TYPE_CHECKING:
     from .butler import Datastore
@@ -21,6 +28,7 @@ if TYPE_CHECKING:
 class SignedPermissions(enum.Flag):
     """Flag enum for operations a signed URI can support."""
 
+    NONE = 0
     GET = enum.auto()
     PUT = enum.auto()
     DELETE = enum.auto()
@@ -66,14 +74,14 @@ class OpaqueRecordSet(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def to_sql_rows(self, table: OpaqueTableName) -> tuple[dict[str, Any], ...]:
+    def to_sql_rows(self, table: OpaqueTableName) -> tuple[dict[ColumnName, Any], ...]:
         """Extract the records for one table as a tuple of mappings, where each
         mapping corresponds to a row in that table.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def insert_sql_rows(self, table: OpaqueTableName, rows: Iterable[Mapping[str, Any]]) -> None:
+    def insert_sql_rows(self, table: OpaqueTableName, rows: Iterable[Mapping[ColumnName, Any]]) -> None:
         raise NotImplementedError()
 
     @abstractmethod

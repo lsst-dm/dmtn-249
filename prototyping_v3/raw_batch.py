@@ -1,22 +1,22 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, Any, final
+from typing import Any, final
 
 import pydantic
 from lsst.daf.butler import CollectionType, DataIdValue, DimensionRecord
 
 from .primitives import SequenceEditMode, SetEditMode, SetInsertMode
 
-if TYPE_CHECKING:
-    from .aliases import (
-        CollectionDocumentation,
-        CollectionName,
-        DatasetTypeName,
-        DimensionElementName,
-        StorageClassName,
-    )
-    from .primitives import DatasetRef, DatasetType, DimensionGroup, OpaqueRecordSet, RepoValidationContext
+from .aliases import (
+    CollectionDocumentation,
+    CollectionName,
+    DatasetTypeName,
+    DimensionElementName,
+    StorageClassName,
+)
+from .opaque import OpaqueRecordSet, RepoValidationContext
+from .primitives import DatasetRef, DatasetType, DimensionGroup
 
 
 @final
