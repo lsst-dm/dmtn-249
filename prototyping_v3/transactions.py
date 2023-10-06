@@ -10,14 +10,13 @@ from typing import Any, Self
 
 import pydantic
 
+from lsst.daf.butler import StoredDatastoreItemInfo
 from lsst.resources import ResourcePath
 from lsst.utils.doImport import doImportType
 from lsst.utils.introspection import get_full_type_name
 
-from .aliases import ArtifactTransactionName, CollectionName
+from .aliases import ArtifactTransactionName, CollectionName, OpaqueTableName, StorageURI
 from .butler import Datastore
-from .opaque import OpaqueRecordSet
-from .primitives import Permissions
 from .raw_batch import RawBatch
 
 
@@ -72,24 +71,27 @@ class ArtifactTransaction(ABC):
         need to be removed at the start of an artifact transaction and
         re-inserted only if the transaction is *successfully* abandoned (which
         may not always be possible, e.g. if artifacts have already been
-        irreversably deleted).
+        irreversibly deleted).
         """
         return frozenset()
 
     @abstractmethod
-    def get_uris(self, resolution: ArtifactTransactionResolution) -> dict[ResourcePath, Permissions]:
-        """Return a mapping of URIs that need be signed to pass to `run`."""
+    def get_uris(self, datastore: Datastore) -> list[StorageURI]:
+        """Return possibly-relative URIs that need to be turned into
+        possibly-signed and definitely absolute URLs to pass to `run`.
+        """
         raise NotImplementedError()
 
     @abstractmethod
-    def run(
+    def run_phase_one(
         self,
         resolution: ArtifactTransactionResolution,
         datastore: Datastore,
-        uris: Mapping[ResourcePath, ResourcePath],
-        verify: bool = False,
-    ) -> tuple[RawBatch, OpaqueRecordSet, bool]:
-        """Commit or abandon this transaction.
+        paths: Mapping[StorageURI, ResourcePath],
+    ) -> dict[OpaqueTableName, list[StoredDatastoreItemInfo]]:
+        """Begin to commit or abandon this transaction.
+
+        This method will always be called by the client.
 
         Parameters
         ----------
@@ -97,51 +99,37 @@ class ArtifactTransaction(ABC):
             Whether to commit or abandon.
         datastore : `Datastore`
             Datastore client for this data repository.
-        uris : `~collections.abc.Mapping` [ `~lsst.resources.ResourcePath`, \
+        paths : `~collections.abc.Mapping` [ `str`, \
                 `~lsst.resources.ResourcePath` ]
-            Mapping from unsigned URI to signed URI.  Keys are the same as
-            those returned by `get_uris` for the resolution, and values have
-            the permissions specified there.  Values are the same as keys when
-            signing is unnecessary.
-        verify : `bool`, optional
-            If `False`, do not spend extra time verifying that datastore
-            artifact state is consistent with the returned opaque records,
-            because the caller guarantees that `verify` will be
-            called before any database changes are made.  This is typically
-            passed on the client side in client/server butlers, since the
-            verification needs to be done on the server side anyway.
-            If `True`, either do this verification as part of executing the
-            transaction or call `verify` before returning.
+            Mapping from unsigned possibly-relative URI to absolute
+            possibly-signed URI.  Keys are the same as those returned by
+            `get_uris` for the resolution.
 
         Returns
         -------
         final_batch : `RawBatch`
             Database operations to apply when the transaction is closed.
         records : `OpaqueRecordSet`
-            Opaque records to insert into the registry when the transaction
-            is closed.
-        verified : `bool`
-            Whether the datastore artifact state was actually verified to be
-            consistent with the returned opaque records.  This must be `True`
-            if ``verify=True``, but it may be `True` even if ``verify=False``
-            if the natural implementation of `run` verifies as a side-effect.
+            Opaque records to insert into the registry when the transaction is
+            closed.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def verify(
+    def run_phase_two(
         self,
         resolution: ArtifactTransactionResolution,
         datastore: Datastore,
-        uris: Mapping[ResourcePath, ResourcePath],
-        records: OpaqueRecordSet,
-    ) -> None:
+        paths: Mapping[StorageURI, ResourcePath],
+        records: dict[OpaqueTableName, list[StoredDatastoreItemInfo]],
+    ) -> RawBatch:
         """Verify that the datastore artifact state is consistent with the
         given records for those records.
 
-        See `run` for parameters, but note that signed URI permissions are
-        always just `SignedPermissions.GET` here, since this method should
-        not modify any persistent state.
+        This method will be called on the server in `RemoteButler`.
+
+        See `run_phase_one` for parameters.  Records are those returned by
+        `run_phase_one`, and may be modified or just verified by this method.
         """
         raise NotImplementedError()
 

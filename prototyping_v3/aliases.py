@@ -26,3 +26,4 @@ StorageClassName: TypeAlias = str
 TransferMode: TypeAlias = str
 ArtifactTransactionName: TypeAlias = str
 ArtifactTransactionID: TypeAlias = int  # or maybe UUID.
+StorageURI: TypeAlias = tuple[str, str]  # Datastore name, possibly-relative URI

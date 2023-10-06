@@ -4,7 +4,14 @@ import uuid
 from typing import Any, final
 
 import pydantic
-from lsst.daf.butler import CollectionType, DataIdValue, DimensionRecord
+from lsst.daf.butler import (
+    CollectionType,
+    DataIdValue,
+    DimensionRecord,
+    StoredDatastoreItemInfo,
+    DimensionUniverse,
+    DimensionGraph,
+)
 
 from .primitives import SequenceEditMode, SetEditMode, SetInsertMode
 
@@ -14,9 +21,9 @@ from .aliases import (
     DatasetTypeName,
     DimensionElementName,
     StorageClassName,
+    OpaqueTableName,
 )
-from .opaque import OpaqueRecordSet, RepoValidationContext
-from .primitives import DatasetRef, DatasetType, DimensionGroup
+from .primitives import DatasetRef, DatasetType
 
 
 @final
@@ -57,7 +64,11 @@ class RawBatch(pydantic.BaseModel):
         | SetCollectionDocumentation
     ] = pydantic.Field(default_factory=list)
 
-    opaque_table_insertions: OpaqueRecordSet | None = None
+    opaque_table_insertions: dict[
+        # TODO: implement pydantic hooks for polymorphism on read, too.
+        OpaqueTableName,
+        list[pydantic.SerializeAsAny[StoredDatastoreItemInfo]],
+    ] = pydantic.Field(default_factory=dict)
 
     dataset_removals: set[uuid.UUID] = pydantic.Field(default_factory=set)
 
@@ -74,7 +85,7 @@ class DatasetTypeRegistration(pydantic.BaseModel):
     """Serializable representation of a dataset type registration operation."""
 
     # No name, since that's the key in a dict and this is the value.
-    dimensions: DimensionGroup
+    dimensions: DimensionGraph
     storage_class_name: StorageClassName
     is_calibration: bool
     update: bool
@@ -83,8 +94,8 @@ class DatasetTypeRegistration(pydantic.BaseModel):
     def from_dataset_type(cls, dataset_type: DatasetType, update: bool) -> DatasetTypeRegistration:
         return cls(
             dimensions=dataset_type.dimensions,
-            storage_class_name=dataset_type.storage_class_name,
-            is_calibration=dataset_type.is_calibration,
+            storage_class_name=dataset_type.storageClass_name,
+            is_calibration=dataset_type.isCalibration(),
             update=update,
         )
 
@@ -150,8 +161,9 @@ class DimensionDataSync(pydantic.BaseModel):
                 "on_insert": list(on_insert),
                 "on_update": list(on_update),
             }:
-                context = RepoValidationContext.from_info(info)
-                element = context.universe[element_name]
+                assert info.context is not None, "TODO: look for server global as well, raise gracefully"
+                universe: DimensionUniverse = info.context["universe"]
+                element = universe[element_name]
                 type_adapter: pydantic.TypeAdapter[Any] = pydantic.TypeAdapter(element.RecordClass)
                 return cls.model_construct(
                     element=element_name,
@@ -210,4 +222,4 @@ class DatasetInsertion(pydantic.BaseModel):
 
     @classmethod
     def from_ref(cls, ref: DatasetRef) -> DatasetInsertion:
-        return cls(uuid=ref.uuid, data_coordinate_values=ref.data_id.values_tuple())
+        return cls(uuid=ref.id, data_coordinate_values=ref.dataId.values_tuple())

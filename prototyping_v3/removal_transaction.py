@@ -8,12 +8,12 @@ from collections.abc import Mapping, Set
 from typing import TYPE_CHECKING, Self, Any
 
 import pydantic
+from lsst.daf.butler import StoredDatastoreItemInfo
 from lsst.resources import ResourcePath
 
-from .aliases import CollectionName
-from .primitives import Permissions, DatasetRef
+from .aliases import CollectionName, OpaqueTableName, StorageURI
+from .primitives import DatasetRef
 from .raw_batch import RawBatch
-from .opaque import OpaqueRecordSet
 from .transactions import ArtifactTransaction, ArtifactTransactionResolution
 
 if TYPE_CHECKING:
@@ -39,60 +39,43 @@ class RemovalTransaction(pydantic.BaseModel, ArtifactTransaction):
     def get_unstores(self) -> Set[uuid.UUID]:
         return self.refs.keys()
 
-    def get_uris(self, resolution: ArtifactTransactionResolution) -> dict[ResourcePath, Permissions]:
-        match resolution:
-            case ArtifactTransactionResolution.COMMIT:
-                permission = Permissions.DELETE
-            case ArtifactTransactionResolution.ABANDON:
-                permission = Permissions.GET
-        result = {}
-        for ref in self.refs.values():
-            assert ref._opaque_records is not None
-            for uri in ref._opaque_records.extract_files():
-                result[uri] = permission
-        return result
+    def get_uris(self, datastore: Datastore) -> list[StorageURI]:
+        return datastore.extract_existing_uris(self.refs.values())
 
-    def run(
+    def run_phase_one(
         self,
         resolution: ArtifactTransactionResolution,
         datastore: Datastore,
-        uris: Mapping[ResourcePath, ResourcePath],
-        verify: bool = False,
-    ) -> tuple[RawBatch, OpaqueRecordSet, bool]:
-        for ref in self.refs.values():
-            assert ref._opaque_records is not None
-            ref._opaque_records.add_signed_uris(uris)
+        paths: Mapping[StorageURI, ResourcePath],
+    ) -> dict[OpaqueTableName, list[StoredDatastoreItemInfo]]:
+        # Can't do anything on client, since we can't delete through signed
+        # URLs.
+        return {}
+
+    def run_phase_two(
+        self,
+        resolution: ArtifactTransactionResolution,
+        datastore: Datastore,
+        paths: Mapping[StorageURI, ResourcePath],
+        records: dict[OpaqueTableName, list[StoredDatastoreItemInfo]],
+    ) -> RawBatch:
         match resolution:
             case ArtifactTransactionResolution.COMMIT:
                 datastore.unstore(self.refs.values())
-                return RawBatch(), datastore.opaque_record_set_type.make_empty(), True
             case ArtifactTransactionResolution.ABANDON:
-                records = datastore.opaque_record_set_type.make_empty()
                 for ref in self.refs.values():
-                    if datastore.verify(ref):
-                        records.update(cast(OpaqueRecordSet, ref._opaque_records))
+                    if datastore.verify(ref, paths):
+                        assert ref._opaque_records is not None
+                        for table_name, records_for_table in ref._opaque_records.items():
+                            # TODO: this extend will lead to duplicates when
+                            # multiple datasets are part of one file, e.g.
+                            # DECam raws.  But deletion of those is already
+                            # problematic (in this prototype) in that we don't
+                            # have a way to check that all such datasets are
+                            # being deleted together.
+                            records.setdefault(table_name, []).extend(records_for_table)
                     else:
                         warnings.warn(
                             f"{ref} has already been deleted; transaction cannot be fully abandoned."
                         )
-                return RawBatch(), records, True
-
-    def verify(
-        self,
-        resolution: ArtifactTransactionResolution,
-        datastore: Datastore,
-        uris: Mapping[ResourcePath, ResourcePath],
-        records: OpaqueRecordSet,
-    ) -> None:
-        match resolution:
-            case ArtifactTransactionResolution.COMMIT:
-                if records:
-                    raise ValueError("Commit validation failed: records should be empty.")
-                for ref in self.refs.values():
-                    assert 
-                # TODO: check that no artifacts exist and no records were
-                # passed.
-            case ArtifactTransactionResolution.ABANDON:
-                # TODO: check that artifacts exist for the records provided.
-                # and do not exist for any other records.
-                
+        return RawBatch()

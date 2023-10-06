@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import uuid
 from collections.abc import Callable, Iterable
 from typing import Any, Protocol, Union, final
 
 import pydantic
-from lsst.daf.butler import DataCoordinate
-from lsst.resources import ResourcePath
+from lsst.daf.butler import DataCoordinate, StoredDatastoreItemInfo, DatasetId
 
-from .aliases import CollectionName, DatasetTypeName, StorageClassName, TransferMode
-from .opaque import Checksum, DatasetOpaqueRecordSet, OpaqueRecordSet, EmptyOpaqueRecordSet
+from .aliases import CollectionName, DatasetTypeName, StorageClassName, TransferMode, OpaqueTableName
 from .primitives import DatasetRef, DatasetType
 
 
@@ -30,12 +27,8 @@ class AbstractArtifactTransferRequest(Protocol):
         self,
         run: CollectionName,
         get_dataset_type: Callable[[DatasetTypeName], DatasetType],
-        get_data_coordinate: Callable[[uuid.UUID], DataCoordinate],
+        get_data_coordinate: Callable[[DatasetId], DataCoordinate],
     ) -> list[DatasetRef]:
-        ...
-
-    def extract_files(self) -> dict[ResourcePath, Checksum | None]:
-        """Return URIs (signed for GET if necessary) and optional checksums."""
         ...
 
 
@@ -58,17 +51,17 @@ class DatasetFileTransferRequest(pydantic.BaseModel):
     attribute for those here.
     """
 
-    dataset_uuid: uuid.UUID
+    dataset_uuid: DatasetId
     dataset_type_name: DatasetTypeName
     storage_class_name: StorageClassName
     transfer_mode: TransferMode
-    file_records: DatasetOpaqueRecordSet
+    file_records: dict[OpaqueTableName, list[StoredDatastoreItemInfo]]
 
     def extract_refs(
         self,
         run: CollectionName,
         get_dataset_type: Callable[[DatasetTypeName], DatasetType],
-        get_data_coordinate: Callable[[uuid.UUID], DataCoordinate],
+        get_data_coordinate: Callable[[DatasetId], DataCoordinate],
     ) -> list[DatasetRef]:
         return [
             DatasetRef(
@@ -79,9 +72,6 @@ class DatasetFileTransferRequest(pydantic.BaseModel):
                 _opaque_records=self.file_records,
             )
         ]
-
-    def extract_files(self) -> dict[ResourcePath, Checksum | None]:
-        return self.file_records.extract_files()
 
 
 @final
@@ -105,14 +95,14 @@ class MultipleCoordinateFileTransferRequest(pydantic.BaseModel):
     dataset_type_name: DatasetTypeName
     storage_class_name: StorageClassName
     common_data_id: DataCoordinate
-    child_records: dict[uuid.UUID, DatasetOpaqueRecordSet]
+    child_records: dict[DatasetId, dict[OpaqueTableName, list[StoredDatastoreItemInfo]]]
     transfer_mode: TransferMode
 
     def extract_refs(
         self,
         run: CollectionName,
         get_dataset_type: Callable[[DatasetTypeName], DatasetType],
-        get_data_coordinate: Callable[[uuid.UUID], DataCoordinate],
+        get_data_coordinate: Callable[[DatasetId], DataCoordinate],
     ) -> list[DatasetRef]:
         return [
             DatasetRef(
@@ -125,21 +115,13 @@ class MultipleCoordinateFileTransferRequest(pydantic.BaseModel):
             for dataset_uuid, dataset_records in self.child_records.items()
         ]
 
-    def extract_files(self) -> dict[ResourcePath, Checksum | None]:
-        for records in self.child_records.values():
-            # Records for children may differ, but the whole point of this
-            # ArtifactTransferRequest type is that they refer to the same
-            # file, so we just need one loop iteration.
-            return records.extract_files()
-        raise AssertionError("MultipleCoordinateFileTransferRequest must have children.")
-
 
 @final
 class MultipleTypeFileTransferRequestDataset(pydantic.BaseModel):
-    dataset_uuid: uuid.UUID
+    dataset_uuid: DatasetId
     dataset_type_name: DatasetTypeName
     storage_class_name: StorageClassName
-    file_records: DatasetOpaqueRecordSet
+    file_records: dict[OpaqueTableName, list[StoredDatastoreItemInfo]]
 
 
 @final
@@ -164,7 +146,7 @@ class MultipleTypeFileTransferRequest(pydantic.BaseModel):
         self,
         run: CollectionName,
         get_dataset_type: Callable[[DatasetTypeName], DatasetType],
-        get_data_coordinate: Callable[[uuid.UUID], DataCoordinate],
+        get_data_coordinate: Callable[[DatasetId], DataCoordinate],
     ) -> list[DatasetRef]:
         return [
             DatasetRef(
@@ -176,14 +158,6 @@ class MultipleTypeFileTransferRequest(pydantic.BaseModel):
             )
             for dataset in self.datasets
         ]
-
-    def extract_files(self) -> dict[ResourcePath, Checksum | None]:
-        for dataset in self.datasets:
-            # Records for children may differ, but the whole point of this
-            # ArtifactTransferRequest type is that they refer to the same
-            # file, so we just need one loop iteration.
-            return dataset.file_records.extract_files()
-        raise AssertionError("MultipleTypeFileTransferRequest must have datasets.")
 
 
 @final
@@ -199,7 +173,7 @@ class StructuredDataTransferRequest(pydantic.BaseModel):
     metric storage class and upload them, etc.
     """
 
-    dataset_uuid: uuid.UUID
+    dataset_uuid: DatasetId
     dataset_type_name: DatasetTypeName
     storage_class_name: StorageClassName
     data: dict[str, Any]
@@ -208,7 +182,7 @@ class StructuredDataTransferRequest(pydantic.BaseModel):
         self,
         run: CollectionName,
         get_dataset_type: Callable[[DatasetTypeName], DatasetType],
-        get_data_coordinate: Callable[[uuid.UUID], DataCoordinate],
+        get_data_coordinate: Callable[[DatasetId], DataCoordinate],
     ) -> list[DatasetRef]:
         return [
             DatasetRef(
@@ -216,12 +190,9 @@ class StructuredDataTransferRequest(pydantic.BaseModel):
                 get_dataset_type(self.dataset_type_name),
                 get_data_coordinate(self.dataset_uuid),
                 run=run,
-                _opaque_records=DatasetOpaqueRecordSet(EmptyOpaqueRecordSet()),
+                _opaque_records={},
             )
         ]
-
-    def extract_files(self) -> dict[ResourcePath, Checksum | None]:
-        return {}
 
 
 @final
@@ -238,16 +209,16 @@ class OpaqueRecordTransferRequest(pydantic.BaseModel):
     someday.
     """
 
-    dataset_uuid: uuid.UUID
+    dataset_uuid: DatasetId
     dataset_type_name: DatasetTypeName
     storage_class_name: StorageClassName
-    opaque_records: DatasetOpaqueRecordSet
+    opaque_records: dict[OpaqueTableName, list[StoredDatastoreItemInfo]]
 
     def extract_refs(
         self,
         run: CollectionName,
         get_dataset_type: Callable[[DatasetTypeName], DatasetType],
-        get_data_coordinate: Callable[[uuid.UUID], DataCoordinate],
+        get_data_coordinate: Callable[[DatasetId], DataCoordinate],
     ) -> list[DatasetRef]:
         return [
             DatasetRef(
@@ -258,9 +229,6 @@ class OpaqueRecordTransferRequest(pydantic.BaseModel):
                 _opaque_records=self.opaque_records,
             )
         ]
-
-    def extract_files(self) -> dict[ResourcePath, Checksum | None]:
-        return {}
 
 
 # Union of all recognized concrete ArtifactTransferRequest types.  Note that
@@ -277,14 +245,14 @@ ArtifactTransferRequest = Union[
 
 class ArtifactTransferResponse(pydantic.BaseModel):
     origin: ArtifactTransferRequest
-    destination_records: OpaqueRecordSet
+    destination_records: dict[OpaqueTableName, list[StoredDatastoreItemInfo]]
 
 
 class ArtifactTransferManifest(pydantic.BaseModel):
     # TODO: need to factor the first tow attributes with RawBatch better;
     # job for a dataset container type.
     dataset_types: dict[DatasetTypeName, DatasetType]
-    data_coordinates: dict[uuid.UUID, DataCoordinate]
+    data_coordinates: dict[DatasetId, DataCoordinate]
     responses: dict[CollectionName, ArtifactTransferResponse]
 
     def extract_refs(self) -> Iterable[DatasetRef]:

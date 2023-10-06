@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import dataclasses
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from lsst.resources import ResourcePath
 
-from .aliases import GetParameter, InMemoryDataset
+from lsst.daf.butler import StoredDatastoreItemInfo, ddl
+from .aliases import GetParameter, InMemoryDataset, OpaqueTableName, StorageURI
 from .artifact_transfer import ArtifactTransferManifest, ArtifactTransferRequest
 from .extension_config import ExtensionConfig
-from .opaque import DatasetOpaqueRecordSet, OpaqueRecordSet
 from .primitives import DatasetRef
+
+if TYPE_CHECKING:
+    from .persistent_limited_butler import PersistentLimitedButler
 
 
 class DatastoreConfig(ExtensionConfig):
@@ -18,6 +22,12 @@ class DatastoreConfig(ExtensionConfig):
     @abstractmethod
     def make_datastore(cls, root: ResourcePath) -> Datastore:
         raise NotImplementedError()
+
+
+@dataclasses.dataclass
+class DatastoreTableDefinition:
+    spec: ddl.TableSpec
+    record_type: type[StoredDatastoreItemInfo]
 
 
 class Datastore(ABC):
@@ -29,12 +39,25 @@ class Datastore(ABC):
 
     @property
     @abstractmethod
-    def opaque_record_set_type(self) -> type[OpaqueRecordSet]:
+    def tables(self) -> Mapping[OpaqueTableName, DatastoreTableDefinition]:
         raise NotImplementedError()
 
-    @property
     @abstractmethod
-    def dataset_opaque_record_set_type(self) -> type[DatasetOpaqueRecordSet]:
+    def extract_existing_uris(self, refs: Iterable[DatasetRef]) -> list[StorageURI]:
+        """Extract URIs from the records attached to datasets.
+
+        These are possibly-relative URIs that need to be made absolute and
+        possibly signed in order to be used.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def predict_new_uris(self, refs: Iterable[DatasetRef]) -> list[StorageURI]:
+        """Predict URIs for new datasets to be written.
+
+        These are possibly-relative URIs that need to be made absolute and
+        possibly signed in order to be used.
+        """
         raise NotImplementedError()
 
     @abstractmethod
@@ -42,6 +65,7 @@ class Datastore(ABC):
         self,
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any]]],
         /,
+        paths: Mapping[StorageURI, ResourcePath],
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], InMemoryDataset]]:
         """Load datasets into memory.
 
@@ -76,7 +100,10 @@ class Datastore(ABC):
 
     @abstractmethod
     def receive_transfer_requests(
-        self, refs: Iterable[DatasetRef], requests: Iterable[ArtifactTransferRequest], origin: Datastore
+        self,
+        refs: Iterable[DatasetRef],
+        requests: Iterable[ArtifactTransferRequest],
+        origin: PersistentLimitedButler,
     ) -> ArtifactTransferManifest:
         """Create a manifest that records how this datastore would receive the
         given artifacts from another datastore.
@@ -85,13 +112,14 @@ class Datastore(ABC):
 
         Parameters
         ----------
-        TODO: make refs a convenience collection
+        refs : `~collections.abc.Iterable` [ `DatasetRef` ]
+            Datasets to be received.
         requests : `~collections.abc.Iterable` [ `ArtifactTransferRequest` ]
             Artifacts according to the origin datastore.  Minimal-effort
             transfers - like file copies - preserve artifacts, but in the
             general case transfers only need to preserve datasets.
-        origin : `Datastore`
-            Datastore that owns or at least knows how to read the datasets
+        origin : `PersistentLimitedButler`
+            Butler that owns or at least knows how to read the datasets
             being transferred.
 
         Returns
@@ -105,33 +133,18 @@ class Datastore(ABC):
 
     @abstractmethod
     def execute_transfer_manifest(
-        self, manifest: ArtifactTransferManifest, origin: Datastore
-    ) -> OpaqueRecordSet:
-        """Actually execute transfers to this datastore.
-
-        Notes
-        -----
-        The manifest may include signed URIs, but this is not guaranteed and
-        the datastore should be prepared to refresh them if they are absent
-        or expired.
-        """
+        self,
+        manifest: ArtifactTransferManifest,
+        destination_paths: Mapping[StorageURI, ResourcePath],
+        origin: PersistentLimitedButler,
+    ) -> dict[OpaqueTableName, list[StoredDatastoreItemInfo]]:
+        """Actually execute transfers to this datastore."""
         raise NotImplementedError()
 
     @abstractmethod
-    def abandon_transfer_manifest(self, manifest: ArtifactTransferManifest) -> None:
-        """Delete artifacts from a manifest that has been partially
-        transferred.
-
-        Notes
-        -----
-        The manifest may include signed URIs, but this is not guaranteed and
-        the datastore should be prepared to refresh them if they are absent
-        or expired.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def put(self, obj: InMemoryDataset, ref: DatasetRef) -> DatasetOpaqueRecordSet:
+    def put(
+        self, obj: InMemoryDataset, ref: DatasetRef, uris: Mapping[str, ResourcePath]
+    ) -> dict[OpaqueTableName, list[StoredDatastoreItemInfo]]:
         """Write an in-memory object to this datastore.
 
         Parameters
@@ -145,14 +158,8 @@ class Datastore(ABC):
 
         Returns
         -------
-        records : `DatasetOpaqueRecordSet`
+        records
             Records needed by the datastore in order to read the dataset.
-
-        Notes
-        -----
-        The fact that no signed URIs are passed here enshrines the idea that a
-        signed-URI datastore will always need to be able to go get them itself,
-        at least for writes.
         """
         raise NotImplementedError()
 
@@ -167,21 +174,18 @@ class Datastore(ABC):
         left artifacts in an unexpected state.
 
         The given `DatasetRef` object may or may not have opaque records
-        attached, and if records are attached, they may or may not have signed
-        URIs (though if signed URIs are attached, they are guaranteed to be
-        signed for delete and existence-check operations), and signed URIs may
-        need to be refreshed.  If no records are attached implementations may
-        assume that they would be the same as would be returned by calling
-        `put` on these refs.
+        attached.  If no records are attached implementations may assume that
+        they would be the same as would be returned by calling `put` on these
+        refs.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def verify(self, ref: DatasetRef) -> bool:
+    def verify(self, ref: DatasetRef, paths: Mapping[StorageURI, ResourcePath]) -> bool:
         """Test whether all artifacts are present for a dataset.
 
-        If all artifacts are present and all checksums embedded in records are
-        are correct, return `True`.  If no artifacts are present, return
-        `False`.  If only some artifacts are present or checksums fail, raise.
+        If all artifacts are present , return `True`.  If no artifacts are
+        present, return `False`.  If only some artifacts are present or any
+        artifact is corrupted, raise.
         """
         raise NotImplementedError()

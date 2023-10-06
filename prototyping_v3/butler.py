@@ -30,7 +30,7 @@ from .aliases import (
     StorageClassName,
 )
 from .transactions import ArtifactTransaction
-from .limited_butler import LimitedButler
+from .persistent_limited_butler import PersistentLimitedButler
 from .primitives import DatasetRef, DatasetType, DeferredDatasetHandle
 from .datastore import Datastore
 
@@ -54,7 +54,7 @@ class ButlerClientCache:
     dimension_records: Mapping[DimensionElementName, Mapping[tuple[DataIdValue, ...], DimensionRecord]]
 
 
-class Butler(LimitedButler):
+class Butler(PersistentLimitedButler):
     """Base class for full clients of butler data repositories."""
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Butler:
@@ -147,7 +147,8 @@ class Butler(LimitedButler):
             parameters.append(parameters_for_ref)
             refs.append(ref)
         expanded_refs = self.expand_existing_dataset_refs(refs)
-        return self._datastore.get_many(zip(list(expanded_refs), parameters))
+        paths = self._get_resource_paths(self._datastore.extract_existing_uris(expanded_refs))
+        return self._datastore.get_many(zip(list(expanded_refs), parameters), paths)
 
     @overload
     def get_deferred(
@@ -231,28 +232,31 @@ class Butler(LimitedButler):
     # those are not fundamentally different from transfer_from in terms of what
     # the receiving butler needs to do.
     #
-    # These need to have different implementations in RemoteButler and
-    # DirectButler, because the responsibility for ensuring consistency between
-    # Datastore artifacts and opaque records has to move to the server in the
-    # former, while it can only live in the client in the latter.
-    #
     ###########################################################################
 
-    @abstractmethod
     def put_many(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> Iterable[DatasetRef]:
         # Signature is inherited, but here it accepts not-expanded refs.
-        raise NotImplementedError()
+        raise NotImplementedError("TODO")
 
-    @abstractmethod
-    def transfer_from(self, origin: Butler, refs: Iterable[DatasetRef], mode: str) -> None:
-        raise NotImplementedError()
+    def transfer_from(self, origin: PersistentLimitedButler, refs: Iterable[DatasetRef], mode: str) -> None:
+        from .transfer_transaction import TransferTransaction
 
-    @abstractmethod
-    def unstore_datasets(
-        self,
-        refs: Iterable[DatasetRef],
-    ) -> None:
-        raise NotImplementedError()
+        requests = origin._datastore.make_transfer_requests(refs, mode)
+        manifest = self._datastore.receive_transfer_requests(refs, requests, origin)
+        transaction = TransferTransaction.model_construct(
+            manifest=manifest,
+            origin_root=origin._root,
+            origin_config=origin._config,
+        )
+        transaction_name, _ = self.begin_transaction(transaction)
+        self.commit(transaction_name)
+
+    def unstore_datasets(self, refs: Iterable[DatasetRef]) -> None:
+        from .removal_transaction import RemovalTransaction
+
+        transaction = RemovalTransaction(refs={ref.id: ref for ref in refs})
+        transaction_name, _ = self.begin_transaction(transaction)
+        self.commit(transaction_name)
 
     ###########################################################################
     #
@@ -320,7 +324,7 @@ class Butler(LimitedButler):
         self,
         transaction: ArtifactTransaction,
         name: ArtifactTransactionName | None = None,
-    ) -> tuple[ArtifactTransaction, bool]:
+    ) -> tuple[ArtifactTransactionName, bool]:
         """Open a persistent transaction in this repository.
 
         Parameters
@@ -339,8 +343,8 @@ class Butler(LimitedButler):
 
         Returns
         -------
-        transaction
-            New transaction object.
+        name
+            Name fo the transaction.
         just_opened
             Whether this process actually opened the transaction (`True`) vs.
             finding an already-open identical one (`False`).  This is important
