@@ -1,57 +1,69 @@
 from __future__ import annotations
 
+__all__ = ("Datastore", "DatastoreConfig", "DatastoreTableDefinition", "ArtifactTransferResponse")
+
+import dataclasses
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
-from contextlib import AbstractContextManager
-from typing import Any
+from typing import Any, TypeAlias, TYPE_CHECKING, final
 
-from lsst.daf.butler import DatastoreConfig, FileDataset
 from lsst.resources import ResourcePath
 
-from .aliases import GetParameter, InMemoryDataset, JournalPathMap
-from .primitives import (
-    DatasetRef,
-    OpaqueTableBatch,
-    OpaqueTableKeyBatch,
-)
+from lsst.daf.butler import StoredDatastoreItemInfo, ddl
+from .aliases import GetParameter, InMemoryDataset, DatastoreTableName, StorageURI
+from .artifact_transfer_request import ArtifactTransferRequest
+from .extension_config import ExtensionConfig
+from .primitives import DatasetRef
+
+if TYPE_CHECKING:
+    from .persistent_limited_butler import PersistentLimitedButler
 
 
 class Datastore(ABC):
-    """Abstract interface for storage backends.
-
-    The new Datastore interface has no methods in common with the current one,
-    but plenty that are extremely similar in spirit.  Overall this interface is
-    designed to be precise and concise to make it easier to write Datastore
-    implementations - convenience logic like accepting multiple similar kinds
-    of arguments has been moved up into butler to avoid requiring each
-    Datastore to reimplement it.
-
-    I've tried to sketch this out with `ChainedDatastore` very much in mind,
-    but actually trying to prototype that implementation out while delegating
-    to the same interface on child Datastores is something we absolutely do
-    before diving all the way into the implementation.  We should probably also
-    try to work out in more detail how a FileDatastore with signed URIs would
-    implement these.
-
-    A method for existence checks needs to be added, but I keep going in
-    circles trying to precisely define the behavior of the `LimitedButler` and
-    `Butler` methods that would delegate to it, and I don't want that to hold
-    up getting the rest of the prototype out for review sooner.
+    """Interface for the polymorphic butler component that stores dataset
+    contents.
     """
 
     config: DatastoreConfig
+    """Configuration that can be used to reconstruct this datastore.
+    """
+
+    @property
+    @abstractmethod
+    def tables(self) -> Mapping[DatastoreTableName, DatastoreTableDefinition]:
+        """Database tables needed to store this Datastore's records."""
+        raise NotImplementedError()
+
+    @abstractmethod
+    def extract_existing_uris(self, refs: Iterable[DatasetRef]) -> list[StorageURI]:
+        """Extract URIs from the records attached to datasets.
+
+        These are possibly-relative URIs that need to be made absolute and
+        possibly signed in order to be used.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def predict_new_uris(self, refs: Iterable[DatasetRef]) -> list[StorageURI]:
+        """Predict URIs for new datasets to be written.
+
+        These are possibly-relative URIs that need to be made absolute and
+        possibly signed in order to be used.
+        """
+        raise NotImplementedError()
 
     @abstractmethod
     def get_many(
         self,
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any]]],
         /,
+        paths: Mapping[StorageURI, ResourcePath],
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], InMemoryDataset]]:
         """Load datasets into memory.
 
         Incoming `DatasetRef` objects will have already been fully expanded to
-        include both expanded data IDs and all possibly-relevant opaque table
-        records.
+        include both expanded data IDs and all possibly-relevant datastore
+        table records.
 
         Notes
         -----
@@ -59,229 +71,196 @@ class Datastore(ABC):
         in, to better permit async implementations with lazy first-received
         iterator returns.  Implementations that can guarantee consistent
         ordering might want to explicitly avoid it, to avoid allowing callers
-        to grow dependent on that behavior instead of checking the return
-        ``DatasetRef`` objects themselves.
+        to grow dependent on that behavior instead of checking the returned
+        `DatasetRef` objects themselves.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def get_many_uris(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, ResourcePath]]:
-        """Return URIs for the given datasets.
+    def initiate_transfer_from(
+        self, refs: Iterable[DatasetRef], transfer_mode: str
+    ) -> Iterable[ArtifactTransferRequest]:
+        """Map the given datasets into artifact transfer requests that could
+        be used to transfer those datasets to another datastore.
 
-        Incoming `DatasetRef` objects will have already been fully expanded to
-        include both expanded data IDs and all possibly-relevant opaque table
-        records.
-
-        Notes
-        -----
-        If a dataset is represented by multiple URIs they should all be
-        returned, with component `DatasetRef` objects if appropriate.  If a
-        dataset has no URI (e.g. because it is in a Datastore that does not
-        use them), it should not be returned.
-
-        I'm not sure if this method should be returning signed URLs or not when
-        that's what the Datastore uses.  Returning a URL that isn't signed and
-        hence can't be used at all doesn't seem useful, but we probably need
-        the user to say what they're going to do with it (read, write, delete)
-        in order to sign it.
+        Each transfer request object should represent an integral number of
+        datasets and correspond to how the artifacts would ideally be
+        transferred to another datastore of the same type.  There is no
+        guarantee that the receiving datastore will keep the same artifacts.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def put_many(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> OpaqueTableBatch:
-        """Insert new datasets from in-memory objects, assuming some kind of
-        external datastore transaction (such as QuantumGraph execution) is
-        already under way.
-
-        Incoming `DatasetRef` objects will have already been fully expanded to
-        include both expanded data IDs and opaque table records (as predicted
-        by `DatastoreBridge.make_opaque_values` and signed by
-        `DatastoreBridge.sign_opaque_value`).
-
-        Full `Butler` should use `put_many_transaction` instead.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def put_many_transaction(
-        self,
-        arg: Iterable[tuple[InMemoryDataset, DatasetRef]],
-        journal_paths: JournalPathMap,
-        /,
-    ) -> AbstractContextManager[OpaqueTableBatch]:
-        """Insert new datasets for in-memory objects within a journal-file
-        transaction.
-
-        Incoming `DatasetRef` objects will have already been fully expanded to
-        include both expanded data IDs and opaque table records (as predicted
-        by `DatastoreBridge.make_opaque_values` and signed by
-        `DatastoreBridge.sign_opaque_value`).
-
-        Notes
-        -----
-        Simply calling this method performs no write operations of any kind.
-        Implementations *may* check or otherwise process inputs.
-
-        Entering the context manager first writes a journal file (to
-        ``journal_url``, which will be a signed URL if one is needed for this
-        datastore) or otherwise persists the list of datasets (at least UUIDs,
-        generally a URI or other storage-specific identifier as well) to a
-        location that indicates that a fallable write operation is underway
-        involving these datasets.  It then actually performs all writes, and
-        finally returns iterables of opaque table rows that must be inserted
-        into the Registry before the context exits.
-
-        When the context manager exists without an error, the journal file (or
-        equivalent) is deleted.
-
-        When the context exits with an exception, an attempt may be made to
-        delete the recently-added files, and the journal file may be removed if
-        this is successful.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def unstore(self, refs: Iterable[DatasetRef]) -> OpaqueTableKeyBatch:
-        """Remove datasets, assuming some kind of datastore transaction (such
-        as a QuantumGraph exection) is already underway.
-
-        Full `Butler` should use `unstore_transaction` instead.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def unstore_transaction(
-        self, refs: Iterable[DatasetRef], journal_paths: JournalPathMap
-    ) -> AbstractContextManager[OpaqueTableKeyBatch]:
-        """Remove datasets within a journal-file transaction.
-
-        Notes
-        -----
-        Simply calling this method performs no write operations of any kind.
-        Implementations *may* check or otherwise process inputs at this time,
-        including contacting a server to obtain signed URLs.
-
-        Entering the context manager writes a journal file or otherwise
-        persists the list of datasets (at least UUIDs, generally a URI or other
-        storage-specific identifier as well) to a location that indicates that
-        a fallable deletion operation is underway involving these datasets.  It
-        also returns UUIDs that should be used to delete rows from opaque
-        tables by Registry, which must occur before the context exits.
-
-        When the context manager exit without an error, actual deletions are
-        executed and the journal file (or equivalent) is removed only after all
-        deletions have succeeded.
-
-        When the context exits with an exception before any deletions occur,
-        the journal file should be removed.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def receive(
-        self,
-        file_datasets: Mapping[ResourcePath | None, list[FileDataset]],
-        journal_paths: JournalPathMap,
-        *,
-        transfer: str | None = "auto",
-        own_absolute: bool = False,
-        record_validation_info: bool = True,
-        opaque_data: tuple[DatastoreConfig, OpaqueTableBatch] | None = None,
-    ) -> AbstractContextManager[OpaqueTableBatch]:
-        """Add external files to this datastore.
-
-        Parameters
-        ----------
-        file_datasets
-            Files to add to the datastore.  Keys are URI roots for any files
-            that have relative URIs nested under that key (some nested URIs may
-            be absolute).  If a key matches this Datastore's own root, a
-            transfer should never be performed and usable records will
-            generally be available in ``opaque_data``; this represents a
-            receipt of registry content only (e.g. after QuantumGraph execution
-            completes).  `None` may be used as a key if all nested files have
-            absolute URIs; these files should be treated the same as absolute
-            URIs under a root URI key.
-        journal_paths
-            Mapping of signed-if-needed journal file URLs, indexed by datastore
-            name and RUN collection.
-        transfer, optional
-            Transfer mode recognized by `ResourcePath`.  If `None`, the
-            datastore should not assume ownership of the files unless a
-            ``file_datasets`` key matches the datastore's root URI.  If not
-            `None`, files with absolute URIs should still be ingested with no
-            transfer and no assumption of ownership.
-        record_validation_info, optional
-            Whether to record file sizes, checksums, etc.
-        opaque_data, optional
-            Opaque table records for these datasets and the Datastore
-            configuration they originated from.  If this configuration is
-            compatible in ``self``, these records may be used as-is instead of
-            creating new ones.  These records may or may not have validation
-            info present, and if they do, that information may not remain valid
-            if transfers occur.
-
-        Returns
-        -------
-        context
-            A context manager that returns opaque table records for this
-            datastore, superseding any that may have been passed in with
-            ``opaque_data``.  Entering this context manager causes a journal
-            file to be written to manage the transaction and all files to be
-            transferred.  When the context exits successfully the journal file
-            is removed.  When the context exits with an exception, the context
-            manager may attempt to remove files added since the transaction
-            started, and it may remove the journal file if it is certain that
-            this was successful.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def export(
+    def interpret_transfer_to(
         self,
         refs: Iterable[DatasetRef],
-        *,
-        transfer: str | None = "auto",
-        directory: ResourcePath | None = None,
-        return_records: bool = True,
-    ) -> tuple[OpaqueTableBatch | None, Mapping[ResourcePath | None, list[FileDataset]]]:
-        """Export datasets and Datastore metadata.
+        requests: Iterable[ArtifactTransferRequest],
+        origin: PersistentLimitedButler,
+    ) -> list[ArtifactTransferResponse]:
+        """Create a manifest that records how this datastore would receive the
+        given artifacts from another datastore.
+
+        This does not actually perform any artifact writes.
 
         Parameters
         ----------
-        refs
-            Fully expanded `DatasetRef` objects to export.  All relevant
-            Datastore opaque table records will already be attached.
-        transfer, optional
-            Transfer mode recognized by `ResourcePath`.  If `None`,
-            ``directory`` is ignored, all datasets are left where they are and
-            Datastore root URIs should be used as the keys in the mapping of
-            `FileDataset` instances returned.  If not `None`, either all files
-            must have absolute URIs or ``directory`` must not be `None`, and
-            ``directory`` should be the only key in the `FileDataset` mapping
-            returned.
-        directory, optional
-            Root URI for exported datasets after the transfer.  Ignored if
-            ``transfer`` is `None`.  Must be provided if ``transfer`` is not
-            `None` unless all exported files have absolute URIs within the
-            Datastore already.
-        return_records, optional
-            If `True`, return the Datastore's internal records for use by a
-            compatible receiving Datastore.  The `FileDataset` mapping must
-            still be returned as well; it is up to the receiving Datastore to
-            determine whether to use the records or fall back to `FileDataset`
-            ingest.
+        refs : `~collections.abc.Iterable` [ `DatasetRef` ]
+            Datasets to be received.
+        requests : `~collections.abc.Iterable` [ `ArtifactTransferRequest` ]
+            Artifacts according to the origin datastore.  Minimal-effort
+            transfers - like file copies - preserve artifacts, but in the
+            general case transfers only need to preserve datasets.
+        origin : `PersistentLimitedButler`
+            Butler that owns or at least knows how to read the datasets
+            being transferred.
 
         Returns
         -------
-        opaque_table_rows
-            Batch of opaque table rows that represent these datasets, or `None`
-            if ``return_records`` is `False` or the datastore does not have
-            records (though this should only be true of datastores with
-            ephemeral storage).
-        files
-            Mapping from root URI to a list of `FileDataset` instances that are
-            either relative to that root or absolute.  If ``transfer`` is not
-            `None`, ``directory`` will be the only key.
+        response
+            Description of the artifacts to be transferred as interpreted by
+            this datastore.  Embedded destination records may include signed
+            URIs.
         """
         raise NotImplementedError()
+
+    @abstractmethod
+    def execute_transfer_to(
+        self,
+        responses: list[ArtifactTransferResponse],
+        destination_paths: Mapping[StorageURI, ResourcePath],
+        origin: PersistentLimitedButler,
+    ) -> None:
+        """Actually execute transfers to this datastore.
+
+        Parameters
+        ----------
+        responses : `list` [ `ArtifactTransferResponses` ]
+            Responses returned by `interpret_transfer_to`.
+        destination_paths
+            Mapping from possibly-relative URI to definitely-absolute,
+            signed-if-needed URL.
+        origin
+            Butler being transferred from.  May be used to `~LimitedButler.get`
+            datasets to `~LimitedButler.put` them again, or to obtained signed
+            origin `ResourcePath` objects in order to perform artifact
+            transfers.
+        """
+        raise NotImplementedError()
+
+    def serialize_transfer_to(self, responses: list[ArtifactTransferResponse]) -> Any:
+        """Serialize a list of transfer responses created by this datastore
+        to JSON-friendly data.
+
+        If all response instances are pydantic models or are otherwise
+        recognized by pydantic, the ``responses`` list may returned as-is. This
+        is assumed to be the case by the base class implementation.
+        """
+        return responses
+
+    @abstractmethod
+    def deserialize_transfer_to(self, data: Any) -> list[ArtifactTransferRequest]:
+        """Deserialize a list of transfer responses created and then serialized
+        by this datastore from JSON-friendly data.
+
+        If all expected response types are pydantic models or are otherwise
+        recognized by pydantic, this just needs to invoke
+        `pydantic.TypeAdapter.validate_python` or similar using the right type.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def put(self, obj: InMemoryDataset, ref: DatasetRef, uris: Mapping[str, ResourcePath]) -> None:
+        """Write an in-memory object to this datastore.
+
+        Parameters
+        ----------
+        obj
+            Object to write.
+        ref : `DatasetRef`
+            Metadata used to identify the persisted object.  This should not
+            have datastore records attached.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def verify(
+        self, ref: DatasetRef, paths: Mapping[StorageURI, ResourcePath]
+    ) -> tuple[bool, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
+        """Test whether all artifacts are present for a dataset and return
+        records that represent them.
+
+        Parameters
+        ----------
+        ref : ~collections.abc.Iterable` [ `DatasetRef` ]
+            Dataset to verify.  May or may not have datastore records attached;
+            if records are attached, they must be consistent with the artifact
+            content (e.g. if checksums are present, they should be checked).
+        paths : `~collections.abc.Mapping` [ `StorageURI`, `ResourcePath` ]
+            Mapping from possibly-relative URI to definitely-absolute,
+            signed-if-needed URL.
+
+        Returns
+        -------
+        present : `bool`
+            If all artifacts are present , `True`.  If no artifacts are
+            present, `False`.  If only some artifacts are present or any
+            artifact is corrupted an exception is raised.
+        records
+            Datastore records that should be attached to this `DatasetRef`.
+            These must be created from scratch if none were passed in (the
+            datastore may assume its configuration has not changed since the
+            artifact(s) were written) and maybe augmented if incomplete (e.g.
+            if sizes or checksums were absent and have now been calculated).
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def unstore(self, refs: Iterable[DatasetRef]) -> None:
+        """Remove all stored artifacts associated with the given datasets.
+
+        Notes
+        -----
+        Artifacts that do not exist should be silently ignored - that allows
+        this method to be called to clean up after an interrupted operation has
+        left artifacts in an unexpected state.
+
+        The given `DatasetRef` object may or may not have datastore records
+        attached.  If no records are attached the datastore may assume its
+        configuration has not changed since the artifact(s) were written.
+        """
+        raise NotImplementedError()
+
+
+class DatastoreConfig(ExtensionConfig):
+    """Configuration and factory for a `Datastore`."""
+
+    @classmethod
+    @abstractmethod
+    def make_datastore(cls, root: ResourcePath | None) -> Datastore:
+        """Construct a datastore from this configuration and the given root.
+
+        The root is not stored with the configuration to encourage
+        relocatability, and hence must be provided on construction in addition
+        to the config.  The root is only optional if all nested datastores
+        know their own absolute root or do not require any paths.
+        """
+        raise NotImplementedError()
+
+
+@final
+@dataclasses.dataclass
+class DatastoreTableDefinition:
+    """Definition of a database table used to store datastore records."""
+
+    spec: ddl.TableSpec
+    record_type: type[StoredDatastoreItemInfo]
+
+
+ArtifactTransferResponse: TypeAlias = Any
+"""A type alias for the datastore-internal type used to represent the response
+to a sequence of `ArtifactTransferRequest`.
+
+An `ArtifactTransferResponse` generally combines one or more
+`ArtifactTransferResponse` instances with a datastore-specific representation
+of how they will appear in the datastore.
+"""
