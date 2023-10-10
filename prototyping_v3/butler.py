@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, overload
+from typing import Any, overload, final
 
 from lsst.daf.butler import (
     DataCoordinate,
@@ -11,8 +11,10 @@ from lsst.daf.butler import (
     DataIdValue,
     DimensionUniverse,
     StorageClass,
+    DatasetType,
     Timespan,
     DimensionRecord,
+    DeferredDatasetHandle,
 )
 from lsst.daf.butler.registry import CollectionSummary
 from lsst.daf.butler.registry import RegistryDefaults as ButlerClientDefaults
@@ -20,7 +22,6 @@ from lsst.daf.butler.registry.interfaces import CollectionRecord
 from lsst.resources import ResourcePath
 
 from .aliases import (
-    ArtifactTransactionName,
     CollectionPattern,
     CollectionName,
     DatasetTypeName,
@@ -28,47 +29,30 @@ from .aliases import (
     GetParameter,
     InMemoryDataset,
     StorageClassName,
+    StorageURI,
 )
-from .transactions import ArtifactTransaction
-from .persistent_limited_butler import PersistentLimitedButler
-from .primitives import DatasetRef, DatasetType, DeferredDatasetHandle
-from .datastore import Datastore
-
-
-@dataclasses.dataclass
-class ButlerClientCache:
-    """Objects expected to be aggressively fetched and cached on the client
-    side by all butlers.
-
-    "Aggressively" here means "just download everything up front", and
-    refreshing it all when we see a cache miss.
-
-    Or at least that's the simple version we do now - we probably want to at
-    least downgrade from "everything" to "everything the user is allowed to
-    access" for collections, and refine dataset types to just those used in
-    those collections.
-    """
-
-    dataset_types: Mapping[DatasetTypeName, DatasetType]
-    collections: Mapping[CollectionName, tuple[CollectionRecord, CollectionSummary]]
-    dimension_records: Mapping[DimensionElementName, Mapping[tuple[DataIdValue, ...], DimensionRecord]]
+from .artifact_transaction import ArtifactTransaction, ArtifactTransactionName
+from .persistent_limited_butler import PersistentLimitedButler, PersistentLimitedButlerConfig
+from .primitives import DatasetRef
 
 
 class Butler(PersistentLimitedButler):
     """Base class for full clients of butler data repositories."""
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Butler:
+        # This is a placeholder for the real signature, which will need to
+        # be able to return the appropriate concrete Butler subclass while
+        # accepting arguments all implementations must accept.
         raise NotImplementedError()
 
-    _root: ResourcePath
     _cache: ButlerClientCache | None
     _defaults: ButlerClientDefaults
-    _datastore: Datastore
+    _universe: DimensionUniverse
 
+    @final
     @property
-    @abstractmethod
     def dimensions(self) -> DimensionUniverse:
-        raise NotImplementedError("TODO")
+        return self._universe
 
     @property
     @abstractmethod
@@ -80,18 +64,22 @@ class Butler(PersistentLimitedButler):
     # current Butler interface and the Registry public interface.
     ###########################################################################
 
+    @final
     @property
     def collections(self) -> Sequence[CollectionName]:
         return self._defaults.collections
 
+    @final
     @property
     def run(self) -> CollectionName | None:
         return self._defaults.run
 
+    @final
     @property
     def data_id_defaults(self) -> DataCoordinate:
         return self._defaults.dataId
 
+    @final
     def clear_caches(self) -> None:
         """Clear all local caches.
 
@@ -132,9 +120,11 @@ class Butler(PersistentLimitedButler):
         # from what we have now except for snake_case.
         ...
 
+    @final
     def get(self, *args: Any, **kwargs: Any) -> InMemoryDataset:
         raise NotImplementedError("TODO: implement here by delegating to resolve_dataset and get_many.")
 
+    @final
     def get_many(
         self,
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any]]],
@@ -175,11 +165,13 @@ class Butler(PersistentLimitedButler):
         # from what we have now except for snake_case.
         ...
 
+    @final
     def get_deferred(self, *args: Any, **kwargs: Any) -> DeferredDatasetHandle:
         raise NotImplementedError(
             "TODO: implement here by delegating to resolve_dataset and get_many_deferred."
         )
 
+    @final
     def get_many_deferred(
         self,
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any]]],
@@ -193,9 +185,35 @@ class Butler(PersistentLimitedButler):
             refs.append(ref)
         expanded_refs = self.expand_existing_dataset_refs(refs)
         return [
-            (ref, parameters_for_ref, DeferredDatasetHandle(ref, self._datastore))
+            (ref, parameters_for_ref, DeferredDatasetHandle(self, ref, parameters_for_ref))  # type: ignore
             for ref, parameters_for_ref in zip(expanded_refs, parameters)
         ]
+
+    @overload
+    def get_uri(self, ref: DatasetRef) -> StorageURI:
+        ...
+
+    @overload
+    def get_uri(
+        self,
+        dataset_type: DatasetType | DatasetTypeName,
+        data_id: DataId,
+        *,
+        collections: CollectionPattern = None,
+        **kwargs: DataIdValue,
+    ) -> StorageURI:
+        ...
+
+    @final
+    def get_uri(self, *args: Any, **kwargs: Any) -> StorageURI:
+        raise NotImplementedError("TODO: implement here by delegating to resolve_dataset and get_many_uris.")
+
+    def get_many_uris(self, refs: Iterable[DatasetRef]) -> Iterable[tuple[DatasetRef, StorageURI]]:
+        result = []
+        for ref in self.expand_existing_dataset_refs(refs):
+            for uri in self._datastore.extract_existing_uris([ref]):
+                result.append((ref, uri))
+        return result
 
     @overload
     def put(self, obj: InMemoryDataset, ref: DatasetRef) -> DatasetRef:
@@ -217,10 +235,9 @@ class Butler(PersistentLimitedButler):
         # from what we have now except for snake_case.
         ...
 
+    @final
     def put(self, obj: InMemoryDataset, *args: Any, **kwargs: Any) -> DatasetRef:
-        raise NotImplementedError(
-            "TODO: implement here by delegating to expand_data_coordinate and put_many."
-        )
+        raise NotImplementedError("TODO: implement here by delegating to resolve_dataset and put_many.")
 
     ###########################################################################
     #
@@ -234,24 +251,66 @@ class Butler(PersistentLimitedButler):
     #
     ###########################################################################
 
+    @final
     def put_many(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> Iterable[DatasetRef]:
         # Signature is inherited, but here it accepts not-expanded refs.
         raise NotImplementedError("TODO")
 
-    def transfer_from(self, origin: PersistentLimitedButler, refs: Iterable[DatasetRef], mode: str) -> None:
+    @final
+    def transfer_artifacts_from(
+        self, origin: PersistentLimitedButler, refs: Iterable[DatasetRef], mode: str
+    ) -> None:
+        """Transfer dataset artifacts from another butler to this one.
+
+        Parameters
+        ----------
+        origin : `PersistentLimitedButler`
+            Butler to transfer from.
+        refs : `~collections.abc.Iterable` [ `DatasetRef` ]
+            Datasets whose artifacts should be transferred.
+        mode : `str`
+            Transfer mode.  Note that `None` is not supported, because directly
+            writing to a datastore-managed location without an open transaction
+            is now illegal.
+
+        Notes
+        -----
+        For simplicity this method assumes the given datasets already exist in
+        the destination database but are not stored there, so only their
+        artifacts and datastore records need to be transferred.  The extension
+        to more realistic cases just involves constructing a `RawBatch`
+        instance and passing it through the transaction object.
+        """
         from .transfer_transaction import TransferTransaction
 
-        requests = origin._datastore.make_transfer_requests(refs, mode)
-        manifest = self._datastore.receive_transfer_requests(refs, requests, origin)
-        transaction = TransferTransaction.model_construct(
-            manifest=manifest,
+        refs_dict = {ref.id: ref for ref in refs}
+        requests = origin._datastore.initiate_transfer_from(refs_dict.values(), mode)
+        responses = self._datastore.interpret_transfer_to(refs_dict.values(), requests, origin)
+        transaction = TransferTransaction(
+            responses=responses,
             origin_root=origin._root,
             origin_config=origin._config,
+            refs=refs_dict,
         )
         transaction_name, _ = self.begin_transaction(transaction)
         self.commit(transaction_name)
 
+    @final
     def unstore_datasets(self, refs: Iterable[DatasetRef]) -> None:
+        """Remove datasets from storage.
+
+        Parameters
+        ----------
+        refs : `~collections.abc.Iterable` [ `DatasetRef` ]
+            Datasets whose artifacts should be deleted.
+
+        Notes
+        -----
+        For simplicity this method should be deleted from datastore storage but
+        not the database.  The extension to more realistic cases just involves
+        constructing a `RawBatch` instance and passing it through the
+        transaction object.
+        """
         from .removal_transaction import RemovalTransaction
 
         transaction = RemovalTransaction(refs={ref.id: ref for ref in refs})
@@ -269,12 +328,19 @@ class Butler(PersistentLimitedButler):
     #
     ###########################################################################
 
+    @final
     def expand_data_coordinates(self, data_coordinates: Iterable[DataCoordinate]) -> Iterable[DataCoordinate]:
+        """Expand data IDs to include all relevant dimension records."""
         raise NotImplementedError("TODO: implement here by delegating to query() and _cache.")
 
+    @final
     def expand_existing_dataset_refs(self, refs: Iterable[DatasetRef]) -> Iterable[DatasetRef]:
+        """Expand DatasetRefs to include all relevant dimension records and
+        datastore records.
+        """
         raise NotImplementedError("TODO: implement here by delegating to query() and _cache.")
 
+    @final
     def resolve_dataset(
         self,
         dataset_type: DatasetType | DatasetTypeName,
@@ -295,13 +361,14 @@ class Butler(PersistentLimitedButler):
         """
         raise NotImplementedError("TODO: implement here by delegating to query() and _cache.")
 
+    @final
     def refresh(self) -> None:
         """Refresh all client-side caches."""
         raise NotImplementedError("TODO: implement here by delegating to query() and _cache.")
 
     ###########################################################################
     #
-    # Full-butler-only query methods, very abbreviated here since being
+    # Full-butler-only query methods, very abbreviated here, since being
     # read-only they're relevant here only as something other methods delegate
     # to.
     #
@@ -367,7 +434,7 @@ class Butler(PersistentLimitedButler):
           state).  This fails (due to unique constraints in
           ``artifact_transaction_run``) if those runs are already locked.
 
-        - It removes all opaque records associated with the datasets in
+        - It removes all datastore records associated with the datasets in
           `transaction.unstored`.
 
         - It executes `transaction.initial_batch`.
@@ -408,10 +475,10 @@ class Butler(PersistentLimitedButler):
         Administrators are expected to use this to check that there are no
         active artifact transactions before any migration or change to central
         datastore configuration.  Active transactions are permitted to write to
-        datastore locations without having the associated opaque records saved
-        anywhere in advance, so we need to ensure the datastore configuration
-        used to predict artifact locations is not changed while they are
-        active.
+        datastore locations without having the associated datastore records
+        saved anywhere in advance, so we need to ensure the datastore
+        configuration used to predict artifact locations is not changed while
+        they are active.
         """
         raise NotImplementedError()
 
@@ -419,5 +486,39 @@ class Butler(PersistentLimitedButler):
     def vacuum_transactions(self) -> None:
         """Clean up any empty directories and persisted transaction headers not
         associated with an active transaction.
+        """
+        raise NotImplementedError()
+
+
+@dataclasses.dataclass
+class ButlerClientCache:
+    """Objects expected to be aggressively fetched and cached on the client
+    side by all butlers.
+
+    "Aggressively" here means "just download everything up front", and
+    refreshing it all when we see a cache miss.
+
+    Or at least that's the simple version we do now - we probably want to at
+    least downgrade from "everything" to "everything the user is allowed to
+    access" for collections, and refine dataset types to just those used in
+    those collections.
+    """
+
+    dataset_types: Mapping[DatasetTypeName, DatasetType]
+    collections: Mapping[CollectionName, tuple[CollectionRecord, CollectionSummary]]
+    dimension_records: Mapping[DimensionElementName, Mapping[tuple[DataIdValue, ...], DimensionRecord]]
+
+
+class ButlerConfig(PersistentLimitedButlerConfig):
+    """Configuration and factory for a `Butler`."""
+
+    @abstractmethod
+    def make_butler(self, root: ResourcePath | None) -> Butler:
+        """Construct a butler from this configuration and the given root.
+
+        The root is not stored with the configuration to encourage
+        relocatability, and hence must be provided on construction in addition
+        to the config.  The root is only optional if all nested datastores
+        know their own absolute root or do not require any paths.
         """
         raise NotImplementedError()

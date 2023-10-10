@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import uuid
 from typing import Any, final
 
@@ -8,12 +9,9 @@ from lsst.daf.butler import (
     CollectionType,
     DataIdValue,
     DimensionRecord,
-    StoredDatastoreItemInfo,
     DimensionUniverse,
     DimensionGraph,
 )
-
-from .primitives import SequenceEditMode, SetEditMode, SetInsertMode
 
 from .aliases import (
     CollectionDocumentation,
@@ -21,20 +19,19 @@ from .aliases import (
     DatasetTypeName,
     DimensionElementName,
     StorageClassName,
-    OpaqueTableName,
 )
 from .primitives import DatasetRef, DatasetType
 
 
 @final
 class RawBatch(pydantic.BaseModel):
-    """A batch of butler operations to execute (mostly) within a Registry
+    """A batch of database-only operations to execute (mostly) within a
     transaction.
 
-    Attributes are defined in this class in the order in which Registry should
-    apply them; this should ensure foreign key relationships are always
-    satisfied (unless there's something wrong with what we've been asked to do,
-    and hence we *want* to raise and roll back).
+    Attributes are defined in this class in the order in which they should be
+    applied; this should ensure foreign key relationships are always satisfied
+    (unless there's something wrong with what we've been asked to do, and hence
+    we *want* to raise and roll back).
 
     Dataset type registrations and removals can't go in transactions because
     they can involve table creation and deletion, so we make them go first and
@@ -64,12 +61,6 @@ class RawBatch(pydantic.BaseModel):
         | SetCollectionDocumentation
     ] = pydantic.Field(default_factory=list)
 
-    opaque_table_insertions: dict[
-        # TODO: implement pydantic hooks for polymorphism on read, too.
-        OpaqueTableName,
-        list[pydantic.SerializeAsAny[StoredDatastoreItemInfo]],
-    ] = pydantic.Field(default_factory=dict)
-
     dataset_removals: set[uuid.UUID] = pydantic.Field(default_factory=set)
 
     collection_removals: set[CollectionName] = pydantic.Field(default_factory=set)
@@ -78,6 +69,37 @@ class RawBatch(pydantic.BaseModel):
 
     def update(self, other: RawBatch) -> None:
         raise NotImplementedError("TODO")
+
+
+@final
+class SequenceEditMode(enum.Enum):
+    """Enum for edit operations on sequences."""
+
+    ASSIGN = enum.auto()
+    REMOVE = enum.auto()
+    EXTEND = enum.auto()
+    PREPEND = enum.auto()
+
+
+@final
+class SetInsertMode(enum.Enum):
+    """Enum for insert operations on sets."""
+
+    INSERT_OR_FAIL = enum.auto()
+    INSERT_OR_SKIP = enum.auto()
+    INSERT_OR_REPLACE = enum.auto()
+
+
+@final
+class SetEditMode(enum.Enum):
+    """Enum for edit operations on sets."""
+
+    INSERT_OR_FAIL = SetInsertMode.INSERT_OR_FAIL
+    INSERT_OR_SKIP = SetInsertMode.INSERT_OR_SKIP
+    INSERT_OR_REPLACE = SetInsertMode.INSERT_OR_REPLACE
+    ASSIGN = enum.auto()
+    REMOVE = enum.auto()
+    DISCARD = enum.auto()
 
 
 @final

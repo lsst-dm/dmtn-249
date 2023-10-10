@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+__all__ = ("Datastore", "DatastoreConfig", "DatastoreTableDefinition", "ArtifactTransferResponse")
+
 import dataclasses
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
-from typing import Any, TYPE_CHECKING
+from typing import Any, TypeAlias, TYPE_CHECKING, final
 
 from lsst.resources import ResourcePath
 
 from lsst.daf.butler import StoredDatastoreItemInfo, ddl
-from .aliases import GetParameter, InMemoryDataset, OpaqueTableName, StorageURI
-from .artifact_transfer import ArtifactTransferManifest, ArtifactTransferRequest
+from .aliases import GetParameter, InMemoryDataset, DatastoreTableName, StorageURI
+from .artifact_transfer_request import ArtifactTransferRequest
 from .extension_config import ExtensionConfig
 from .primitives import DatasetRef
 
@@ -17,21 +19,10 @@ if TYPE_CHECKING:
     from .persistent_limited_butler import PersistentLimitedButler
 
 
-class DatastoreConfig(ExtensionConfig):
-    @classmethod
-    @abstractmethod
-    def make_datastore(cls, root: ResourcePath) -> Datastore:
-        raise NotImplementedError()
-
-
-@dataclasses.dataclass
-class DatastoreTableDefinition:
-    spec: ddl.TableSpec
-    record_type: type[StoredDatastoreItemInfo]
-
-
 class Datastore(ABC):
-    """Interface for butler component that stores dataset contents."""
+    """Interface for the polymorphic butler component that stores dataset
+    contents.
+    """
 
     config: DatastoreConfig
     """Configuration that can be used to reconstruct this datastore.
@@ -39,7 +30,8 @@ class Datastore(ABC):
 
     @property
     @abstractmethod
-    def tables(self) -> Mapping[OpaqueTableName, DatastoreTableDefinition]:
+    def tables(self) -> Mapping[DatastoreTableName, DatastoreTableDefinition]:
+        """Database tables needed to store this Datastore's records."""
         raise NotImplementedError()
 
     @abstractmethod
@@ -70,8 +62,8 @@ class Datastore(ABC):
         """Load datasets into memory.
 
         Incoming `DatasetRef` objects will have already been fully expanded to
-        include both expanded data IDs and all possibly-relevant opaque table
-        records.
+        include both expanded data IDs and all possibly-relevant datastore
+        table records.
 
         Notes
         -----
@@ -85,7 +77,7 @@ class Datastore(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def make_transfer_requests(
+    def initiate_transfer_from(
         self, refs: Iterable[DatasetRef], transfer_mode: str
     ) -> Iterable[ArtifactTransferRequest]:
         """Map the given datasets into artifact transfer requests that could
@@ -99,12 +91,12 @@ class Datastore(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def receive_transfer_requests(
+    def interpret_transfer_to(
         self,
         refs: Iterable[DatasetRef],
         requests: Iterable[ArtifactTransferRequest],
         origin: PersistentLimitedButler,
-    ) -> ArtifactTransferManifest:
+    ) -> list[ArtifactTransferResponse]:
         """Create a manifest that records how this datastore would receive the
         given artifacts from another datastore.
 
@@ -124,7 +116,7 @@ class Datastore(ABC):
 
         Returns
         -------
-        manifest
+        response
             Description of the artifacts to be transferred as interpreted by
             this datastore.  Embedded destination records may include signed
             URIs.
@@ -132,19 +124,52 @@ class Datastore(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def execute_transfer_manifest(
+    def execute_transfer_to(
         self,
-        manifest: ArtifactTransferManifest,
+        responses: list[ArtifactTransferResponse],
         destination_paths: Mapping[StorageURI, ResourcePath],
         origin: PersistentLimitedButler,
-    ) -> dict[OpaqueTableName, list[StoredDatastoreItemInfo]]:
-        """Actually execute transfers to this datastore."""
+    ) -> None:
+        """Actually execute transfers to this datastore.
+
+        Parameters
+        ----------
+        responses : `list` [ `ArtifactTransferResponses` ]
+            Responses returned by `interpret_transfer_to`.
+        destination_paths
+            Mapping from possibly-relative URI to definitely-absolute,
+            signed-if-needed URL.
+        origin
+            Butler being transferred from.  May be used to `~LimitedButler.get`
+            datasets to `~LimitedButler.put` them again, or to obtained signed
+            origin `ResourcePath` objects in order to perform artifact
+            transfers.
+        """
+        raise NotImplementedError()
+
+    def serialize_transfer_to(self, responses: list[ArtifactTransferResponse]) -> Any:
+        """Serialize a list of transfer responses created by this datastore
+        to JSON-friendly data.
+
+        If all response instances are pydantic models or are otherwise
+        recognized by pydantic, the ``responses`` list may returned as-is. This
+        is assumed to be the case by the base class implementation.
+        """
+        return responses
+
+    @abstractmethod
+    def deserialize_transfer_to(self, data: Any) -> list[ArtifactTransferRequest]:
+        """Deserialize a list of transfer responses created and then serialized
+        by this datastore from JSON-friendly data.
+
+        If all expected response types are pydantic models or are otherwise
+        recognized by pydantic, this just needs to invoke
+        `pydantic.TypeAdapter.validate_python` or similar using the right type.
+        """
         raise NotImplementedError()
 
     @abstractmethod
-    def put(
-        self, obj: InMemoryDataset, ref: DatasetRef, uris: Mapping[str, ResourcePath]
-    ) -> dict[OpaqueTableName, list[StoredDatastoreItemInfo]]:
+    def put(self, obj: InMemoryDataset, ref: DatasetRef, uris: Mapping[str, ResourcePath]) -> None:
         """Write an in-memory object to this datastore.
 
         Parameters
@@ -153,13 +178,39 @@ class Datastore(ABC):
             Object to write.
         ref : `DatasetRef`
             Metadata used to identify the persisted object.  This should not
-            have opaque records attached when passed, and [if we make
-            DatasetRef mutable] it should have them attached on return.
+            have datastore records attached.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def verify(
+        self, ref: DatasetRef, paths: Mapping[StorageURI, ResourcePath]
+    ) -> tuple[bool, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
+        """Test whether all artifacts are present for a dataset and return
+        records that represent them.
+
+        Parameters
+        ----------
+        ref : ~collections.abc.Iterable` [ `DatasetRef` ]
+            Dataset to verify.  May or may not have datastore records attached;
+            if records are attached, they must be consistent with the artifact
+            content (e.g. if checksums are present, they should be checked).
+        paths : `~collections.abc.Mapping` [ `StorageURI`, `ResourcePath` ]
+            Mapping from possibly-relative URI to definitely-absolute,
+            signed-if-needed URL.
 
         Returns
         -------
+        present : `bool`
+            If all artifacts are present , `True`.  If no artifacts are
+            present, `False`.  If only some artifacts are present or any
+            artifact is corrupted an exception is raised.
         records
-            Records needed by the datastore in order to read the dataset.
+            Datastore records that should be attached to this `DatasetRef`.
+            These must be created from scratch if none were passed in (the
+            datastore may assume its configuration has not changed since the
+            artifact(s) were written) and maybe augmented if incomplete (e.g.
+            if sizes or checksums were absent and have now been calculated).
         """
         raise NotImplementedError()
 
@@ -173,19 +224,43 @@ class Datastore(ABC):
         this method to be called to clean up after an interrupted operation has
         left artifacts in an unexpected state.
 
-        The given `DatasetRef` object may or may not have opaque records
-        attached.  If no records are attached implementations may assume that
-        they would be the same as would be returned by calling `put` on these
-        refs.
+        The given `DatasetRef` object may or may not have datastore records
+        attached.  If no records are attached the datastore may assume its
+        configuration has not changed since the artifact(s) were written.
         """
         raise NotImplementedError()
 
+
+class DatastoreConfig(ExtensionConfig):
+    """Configuration and factory for a `Datastore`."""
+
+    @classmethod
     @abstractmethod
-    def verify(self, ref: DatasetRef, paths: Mapping[StorageURI, ResourcePath]) -> bool:
-        """Test whether all artifacts are present for a dataset.
+    def make_datastore(cls, root: ResourcePath | None) -> Datastore:
+        """Construct a datastore from this configuration and the given root.
 
-        If all artifacts are present , return `True`.  If no artifacts are
-        present, return `False`.  If only some artifacts are present or any
-        artifact is corrupted, raise.
+        The root is not stored with the configuration to encourage
+        relocatability, and hence must be provided on construction in addition
+        to the config.  The root is only optional if all nested datastores
+        know their own absolute root or do not require any paths.
         """
         raise NotImplementedError()
+
+
+@final
+@dataclasses.dataclass
+class DatastoreTableDefinition:
+    """Definition of a database table used to store datastore records."""
+
+    spec: ddl.TableSpec
+    record_type: type[StoredDatastoreItemInfo]
+
+
+ArtifactTransferResponse: TypeAlias = Any
+"""A type alias for the datastore-internal type used to represent the response
+to a sequence of `ArtifactTransferRequest`.
+
+An `ArtifactTransferResponse` generally combines one or more
+`ArtifactTransferResponse` instances with a datastore-specific representation
+of how they will appear in the datastore.
+"""

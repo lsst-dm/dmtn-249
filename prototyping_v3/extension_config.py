@@ -3,7 +3,7 @@ from __future__ import annotations
 __all__ = ("ExtensionConfig",)
 
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Self, final
 
 import pydantic
 from lsst.utils.doImport import doImportType
@@ -46,6 +46,7 @@ class ExtensionConfig(ABC):
 
     _DEFAULT_SUBCLASS: ClassVar[type[Self] | None] = None
 
+    @final
     @classmethod
     def from_dict(cls, data: dict[str, Any] | Self) -> Self:
         if isinstance(data, ExtensionConfig):
@@ -62,6 +63,7 @@ class ExtensionConfig(ABC):
     def _from_dict_impl(cls, data: dict[str, Any]) -> Self:
         raise NotImplementedError()
 
+    @final
     def to_dict(self) -> dict[str, Any]:
         data = self._to_dict_impl()
         data["cls"] = get_full_type_name(self)
