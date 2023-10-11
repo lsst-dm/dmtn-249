@@ -44,6 +44,10 @@ DMTN-242 :cite:`DMTN-242` will provide more detail about how we will actually im
 Component Overview
 ==================
 
+.. image:: /_static/repository-clients.svg
+      :target: _images/repository-clients.svg
+      :alt: Data repositories and their clients
+
 TODO
 
 .. _consistency-model:
