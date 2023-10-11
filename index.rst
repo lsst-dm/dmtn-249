@@ -1,7 +1,5 @@
 :tocdepth: 1
 
-.. py:currentmodule:: lsst.daf.butler
-
 .. sectnum::
 
 .. Metadata such as the title, authors, and description are set in metadata.yaml
@@ -29,10 +27,10 @@ work is the impetus for most of the changes we propose here, even though the
 consistency issues we are trying to solve are long-standing.
 We will need to consider the client/server architecture in the design work to
 fix those issues, and a major piece of this is that we only trust the server to maintain our consistency model.
-Since any consistency model will necessarily involve both database and datastore content, enforcing consistency will have to be a `Butler``responsibility, not a `Registry` or `Datastore` responsibility.
-In order to ensure that the right parts of that enforcement occur on the server, we are pushed strongly towards making `Butler` itself polymorphic (with direct/SQL and client/server implementations) rather `Registry` (with `Datastore` remaining polymorphic for other reasons).
+Since any consistency model will necessarily involve both database and datastore content, enforcing consistency will have to be a `~lsst.daf.butler.Butler` responsibility, not a `~lsst.daf.butler.Registry` or `~lsst.daf.butler.Datastore` responsibility.
+In order to ensure that the right parts of that enforcement occur on the server, we are pushed strongly towards making `~lsst.daf.butler.Butler` itself polymorphic (with direct/SQL and client/server implementations) rather `~lsst.daf.butler.Registry` (with `~lsst.daf.butler.Datastore` remaining polymorphic for other reasons).
 
-If :ref:`component-overview`, we describe the planned high-level division of responsibilities for `Butler`, `Registry`, and `Datastore` in the client/server era.
+If :ref:`component-overview`, we describe the planned high-level division of responsibilities for `~lsst.daf.butler.Butler`, `~lsst.daf.butler.Registry`, and `~lsst.daf.butler.Datastore` in the client/server era.
 :ref:`consistency-model` describes the new consistency model and introduces the *artifact transaction* as a new, limited-lifetime butler component that plays an important role in maintaining consistency.
 In :ref:`use-case-details`, we work through a few important use cases in detail to show how components interact in both client/server and direct-connection contexts.
 :ref:`prototype-code` serves as an appendix of sorts with code listings that together form a thorough prototyping of the changes being proposed here.
@@ -102,7 +100,124 @@ TODO
 Prototype Code
 ==============
 
-TODO
+.. py:class:: LimitedButler
+
+   .. literalinclude:: prototyping/limited_butler.py
+      :language: py
+      :pyobject: LimitedButler
+
+.. py:class:: PersistentLimitedButler
+
+   .. literalinclude:: prototyping/persistent_limited_butler.py
+      :language: py
+      :pyobject: PersistentLimitedButler
+
+.. py:class:: Butler
+
+   .. py:method:: begin_transaction
+
+      .. literalinclude:: prototyping/butler.py
+         :language: py
+         :pyobject: Butler.begin_transaction
+
+   .. py:method:: commit
+
+      .. literalinclude::  prototyping/butler.py
+         :language: py
+         :pyobject: Butler.commit
+
+   .. py:method:: abandon
+
+      .. literalinclude::  prototyping/butler.py
+         :language: py
+         :pyobject: Butler.abandon
+
+   .. py:method:: list_transactions
+
+      .. literalinclude::  prototyping/butler.py
+         :language: py
+         :pyobject: Butler.list_transactions
+
+   .. py:method:: vacuum_transactions
+
+      .. literalinclude::  prototyping/butler.py
+         :language: py
+         :pyobject: Butler.vacuum_transactions
+
+.. py:class:: Datastore
+
+   .. py:attribute:: tables
+
+      .. literalinclude:: prototyping/datastore.py
+         :language: py
+         :pyobject: Datastore.tables
+
+   .. py:method:: extract_existing_uris
+
+      .. literalinclude:: prototyping/datastore.py
+         :language: py
+         :pyobject: Datastore.extract_existing_uris
+
+   .. py:method:: predict_new_uris
+
+      .. literalinclude:: prototyping/datastore.py
+         :language: py
+         :pyobject: Datastore.predict_new_uris
+
+   .. py:method:: get_many
+
+      .. literalinclude:: prototyping/datastore.py
+         :language: py
+         :pyobject: Datastore.get_many
+
+   .. py:method:: initiate_transfer_from
+
+      .. literalinclude:: prototyping/datastore.py
+         :language: py
+         :pyobject: Datastore.initiate_transfer_from
+
+   .. py:method:: interpret_transfer_to
+
+      .. literalinclude:: prototyping/datastore.py
+         :language: py
+         :pyobject: Datastore.interpret_transfer_to
+
+   .. py:method:: execute_transfer_to
+
+      .. literalinclude:: prototyping/datastore.py
+         :language: py
+         :pyobject: Datastore.execute_transfer_to
+
+   .. py:method:: serialize_transfer_to
+
+      .. literalinclude:: prototyping/datastore.py
+         :language: py
+         :pyobject: Datastore.serialize_transfer_to
+
+
+   .. py:method:: deserialize_transfer_to
+
+      .. literalinclude:: prototyping/datastore.py
+         :language: py
+         :pyobject: Datastore.deserialize_transfer_to
+
+   .. py:method:: put
+
+      .. literalinclude:: prototyping/datastore.py
+         :language: py
+         :pyobject: Datastore.put
+
+   .. py:method:: verify
+
+      .. literalinclude:: prototyping/datastore.py
+         :language: py
+         :pyobject: Datastore.verify
+
+   .. py:method:: unstore
+
+      .. literalinclude:: prototyping/datastore.py
+         :language: py
+         :pyobject: Datastore.unstore
 
 
 .. rubric:: References

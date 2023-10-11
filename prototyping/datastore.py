@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__all__ = ("Datastore", "DatastoreConfig", "DatastoreTableDefinition", "ArtifactTransferResponse")
+__all__ = ("Datastore", "DatastoreTableDefinition", "ArtifactTransferResponse")
 
 import dataclasses
 from abc import ABC, abstractmethod
@@ -12,7 +12,6 @@ from lsst.resources import ResourcePath
 from lsst.daf.butler import StoredDatastoreItemInfo, ddl
 from .aliases import GetParameter, InMemoryDataset, DatastoreTableName, StorageURI
 from .artifact_transfer_request import ArtifactTransferRequest
-from .extension_config import ExtensionConfig
 from .primitives import DatasetRef
 
 if TYPE_CHECKING:
@@ -22,10 +21,6 @@ if TYPE_CHECKING:
 class Datastore(ABC):
     """Interface for the polymorphic butler component that stores dataset
     contents.
-    """
-
-    config: DatastoreConfig
-    """Configuration that can be used to reconstruct this datastore.
     """
 
     @property
@@ -227,22 +222,6 @@ class Datastore(ABC):
         The given `DatasetRef` object may or may not have datastore records
         attached.  If no records are attached the datastore may assume its
         configuration has not changed since the artifact(s) were written.
-        """
-        raise NotImplementedError()
-
-
-class DatastoreConfig(ExtensionConfig):
-    """Configuration and factory for a `Datastore`."""
-
-    @classmethod
-    @abstractmethod
-    def make_datastore(cls, root: ResourcePath | None) -> Datastore:
-        """Construct a datastore from this configuration and the given root.
-
-        The root is not stored with the configuration to encourage
-        relocatability, and hence must be provided on construction in addition
-        to the config.  The root is only optional if all nested datastores
-        know their own absolute root or do not require any paths.
         """
         raise NotImplementedError()
 
