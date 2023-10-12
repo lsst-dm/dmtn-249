@@ -2,14 +2,13 @@ from __future__ import annotations
 
 __all__ = ("ArtifactTransaction", "ArtifactTransactionHeader", "ArtifactTransactionName")
 
-import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Set
 from typing import Any, Self, final, TypeAlias
 
 import pydantic
 
-from lsst.daf.butler import StoredDatastoreItemInfo
+from lsst.daf.butler import DatasetId, StoredDatastoreItemInfo
 from lsst.resources import ResourcePath
 from lsst.utils.doImport import doImportType
 from lsst.utils.introspection import get_full_type_name
@@ -101,8 +100,8 @@ class ArtifactTransaction(ABC):
         """
         raise NotImplementedError()
 
-    def get_unstores(self) -> Set[uuid.UUID]:
-        """Return the UUIDs of datasets whose artifacts may be removed by this
+    def get_unstores(self) -> Set[DatasetId]:
+        """Return the IDs of datasets whose artifacts may be removed by this
         transaction.
 
         Since datastore record presence implies artifact existence, datastore
@@ -110,6 +109,13 @@ class ArtifactTransaction(ABC):
         re-inserted only if the transaction is *successfully* abandoned (which
         may not always be possible, e.g. if artifacts have already been
         irreversibly deleted).
+
+        TODO: Just returning a set of IDs here is not sufficient if we want
+        to be able to safely delete artifacts that hold multiple datasets
+        (e.g. DECam raws); only the datastore can know how to do the self-join
+        (e.g. on URI) that identifies those artifacts and tests whether all
+        datasets are being deleted or not.  We need to come up with a way to
+        abstract and probably serialize that information.
         """
         return frozenset()
 
