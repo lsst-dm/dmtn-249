@@ -79,14 +79,16 @@ class LimitedButler(ABC):
         ((_, _, handle),) = self.get_many_deferred([(ref, parameters if parameters is not None else {})])
         return handle
 
-    @abstractmethod
     def get_many_deferred(
         self,
         arg: Iterable[tuple[DatasetRef, Mapping[GetParameter, Any]]],
         /,
     ) -> Iterable[tuple[DatasetRef, Mapping[GetParameter, Any], DeferredDatasetHandle]]:
         """Vectorized implementation of `get_deferred`."""
-        raise NotImplementedError()
+        return [
+            (ref, parameters_for_ref, DeferredDatasetHandle(self, ref, parameters_for_ref))  # type: ignore
+            for ref, parameters_for_ref in arg
+        ]
 
     def get_uri(self, ref: DatasetRef) -> StorageURI:
         """Return the relative URI for the artifact that holds this dataset.

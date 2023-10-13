@@ -414,8 +414,7 @@ class Butler(PersistentLimitedButler):
             Name fo the transaction.
         just_opened
             Whether this process actually opened the transaction (`True`) vs.
-            finding an already-open identical one (`False`).  This is important
-            for at least prompt processing.
+            finding an already-open identical one (`False`).
 
         Notes
         -----

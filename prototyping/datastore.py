@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__all__ = ("Datastore", "DatastoreTableDefinition", "ArtifactTransferResponse")
+__all__ = ("Datastore", "DatastoreTableDefinition", "ArtifactTransferResponse", "DatastoreConfig")
 
 import dataclasses
 from abc import ABC, abstractmethod
@@ -10,6 +10,7 @@ from typing import Any, TypeAlias, TYPE_CHECKING, final
 from lsst.resources import ResourcePath
 
 from lsst.daf.butler import StoredDatastoreItemInfo, ddl
+from .extension_config import ExtensionConfig
 from .aliases import GetParameter, InMemoryDataset, DatastoreTableName, StorageURI
 from .artifact_transfer_request import ArtifactTransferRequest
 from .primitives import DatasetRef
@@ -27,6 +28,17 @@ class Datastore(ABC):
     @abstractmethod
     def tables(self) -> Mapping[DatastoreTableName, DatastoreTableDefinition]:
         """Database tables needed to store this Datastore's records."""
+        raise NotImplementedError()
+
+    @abstractmethod
+    def get_root(self, datastore_name: str) -> ResourcePath | None:
+        """Return the root URL for datasets stored in datastore with the given
+        name.
+
+        If the datastore name is not recognized by this datastore or any nested
+        datastore, `None` should be returned.  If `None` is ultimately returned
+        to the calling code that datastore may have only absolute URLs.
+        """
         raise NotImplementedError()
 
     @abstractmethod
@@ -164,16 +176,18 @@ class Datastore(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def put(self, obj: InMemoryDataset, ref: DatasetRef, uris: Mapping[str, ResourcePath]) -> None:
+    def put_many(
+        self,
+        arg: Iterable[tuple[InMemoryDataset, DatasetRef]],
+        /,
+    ) -> None:
         """Write an in-memory object to this datastore.
 
         Parameters
         ----------
-        obj
-            Object to write.
-        ref : `DatasetRef`
-            Metadata used to identify the persisted object.  This should not
-            have datastore records attached.
+        arg
+            Objects to write and the `DatasetRef` objects that should identify
+            them.
         """
         raise NotImplementedError()
 
@@ -243,3 +257,18 @@ An `ArtifactTransferResponse` generally combines one or more
 `ArtifactTransferResponse` instances with a datastore-specific representation
 of how they will appear in the datastore.
 """
+
+
+class DatastoreConfig(ExtensionConfig):
+    """Configuration and factory for a `Datastore`."""
+
+    @abstractmethod
+    def make_datastore(self, root: ResourcePath | None) -> Datastore:
+        """Construct a datastore from this configuration and the given root.
+
+        The root is not stored with the configuration to encourage
+        relocatability, and hence must be provided on construction in addition
+        to the config.  The root is only optional if all nested datastores
+        know their own absolute root or do not require any paths.
+        """
+        raise NotImplementedError()
