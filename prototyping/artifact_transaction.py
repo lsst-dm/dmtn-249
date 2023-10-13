@@ -55,8 +55,8 @@ class ArtifactTransaction(ABC):
             `None`, the butler implementation does not support workspaces and
             transactions that require them are not supported.
         datastore : `Datastore`
-            Datastore being written to.  Expected to be used to deserialize
-            objects or interpret records only here.
+            Datastore being written to.  Expected to be used only to
+            deserialize objects (e.g. transfer manifests or datastore records).
 
         Returns
         -------
@@ -73,8 +73,8 @@ class ArtifactTransaction(ABC):
         Parameters
         ----------
         datastore : `Datastore`
-            Datastore being written to.  Expected to be used to serialize
-            objects or interpret records only here.
+            Datastore being written to.  Expected to be used only to serialize
+            objects (e.g. transfer manifests or datastore records).
         """
         raise NotImplementedError()
 
@@ -153,7 +153,6 @@ class ArtifactTransaction(ABC):
     def commit_phase_two(
         self,
         datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         """Finish committing this transaction.
 
@@ -164,11 +163,6 @@ class ArtifactTransaction(ABC):
         ----------
         datastore : `Datastore`
             Datastore client for this data repository.
-        paths : `~collections.abc.Mapping` [ `str`, \
-                `~lsst.resources.ResourcePath` ]
-            Mapping from unsigned possibly-relative URI to absolute
-            possibly-signed URL.  Keys are the same as those returned by
-            `get_uris` for the resolution.
 
         Returns
         -------
@@ -206,7 +200,6 @@ class ArtifactTransaction(ABC):
     def abandon_phase_two(
         self,
         datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         """Finish abandoning this transaction.
 
@@ -217,11 +210,6 @@ class ArtifactTransaction(ABC):
         ----------
         datastore : `Datastore`
             Datastore client for this data repository.
-        paths : `~collections.abc.Mapping` [ `str`, \
-                `~lsst.resources.ResourcePath` ]
-            Mapping from unsigned possibly-relative URI to absolute
-            possibly-signed URL.  Keys are the same as those returned
-            `get_uris` for the resolution.
 
         Returns
         -------

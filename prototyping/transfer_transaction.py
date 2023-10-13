@@ -83,16 +83,15 @@ class TransferTransaction(ArtifactTransaction):
     def commit_phase_two(
         self,
         datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         records: dict[DatastoreTableName, list[StoredDatastoreItemInfo]] = {
             table_name: [] for table_name in datastore.tables.keys()
         }
-        for ref in self.refs.values():
-            valid, new_records_for_ref = datastore.verify(ref, paths)
-            if not valid:
+        for dataset_id, present, records_for_dataset in datastore.verify(self.refs.values()):
+            ref = self.refs[dataset_id]
+            if not present:
                 raise RuntimeError(f"Artifacts for {ref} were not transferred.")
-            for table_name, records_for_table in new_records_for_ref.items():
+            for table_name, records_for_table in records_for_dataset.items():
                 records[table_name].extend(records_for_table)
         return RawBatch(), records
 
@@ -108,7 +107,6 @@ class TransferTransaction(ArtifactTransaction):
     def abandon_phase_two(
         self,
         datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         datastore.unstore(self.refs.values())
         return RawBatch(), {}

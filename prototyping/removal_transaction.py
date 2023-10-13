@@ -56,7 +56,6 @@ class RemovalTransaction(pydantic.BaseModel, ArtifactTransaction):
     def commit_phase_two(
         self,
         datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         datastore.unstore(self.refs.values())
         return RawBatch(), {}
@@ -74,15 +73,14 @@ class RemovalTransaction(pydantic.BaseModel, ArtifactTransaction):
     def abandon_phase_two(
         self,
         datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         records: dict[DatastoreTableName, list[StoredDatastoreItemInfo]] = {
             table_name: [] for table_name in datastore.tables.keys()
         }
-        for ref in self.refs.values():
-            if datastore.verify(ref, paths):
-                assert ref._datastore_records is not None
-                for table_name, records_for_table in ref._datastore_records.items():
+        for dataset_id, present, records_for_dataset in datastore.verify(self.refs.values()):
+            ref = self.refs[dataset_id]
+            if present:
+                for table_name, records_for_table in records_for_dataset.items():
                     # TODO: this extend will lead to duplicates when multiple
                     # datasets are part of one file, e.g. DECam raws.  But
                     # deletion of those is already problematic (in this

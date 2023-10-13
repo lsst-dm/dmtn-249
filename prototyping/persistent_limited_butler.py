@@ -3,8 +3,9 @@ from __future__ import annotations
 __all__ = ("PersistentLimitedButler", "PersistentLimitedButlerConfig")
 
 from abc import abstractmethod
-from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Iterable, Iterator, Mapping, Set
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, ClassVar
 
 from lsst.resources import ResourcePath
 
@@ -14,6 +15,51 @@ from .limited_butler import LimitedButler
 
 if TYPE_CHECKING:
     from .datastore import Datastore
+
+
+class PathMapping(Mapping[StorageURI, ResourcePath]):
+    def __init__(
+        self,
+        uris: Set[StorageURI],
+    ):
+        self._uris = uris
+
+    def __iter__(self) -> Iterator[StorageURI]:
+        return iter(self._uris)
+
+    def __contains__(self, __key: object) -> bool:
+        return __key in self._uris
+
+    def __len__(self) -> int:
+        return len(self._uris)
+
+    def __getitem__(self, __key: StorageURI) -> ResourcePath:
+        root, relative = __key
+        if root is not None:
+            return root.join(relative)
+        else:
+            # TODO: I'm not sure forceAbsolute=True is appropriate - we require
+            # the result to be absolute, but we want it to raise if it isn't
+            # already, rather than assume the current directory is relevant.
+            return ResourcePath(relative, forceAbsolute=True)
+
+
+class SignedPathMapping(PathMapping):
+    def __init__(
+        self,
+        uris: Set[StorageURI],
+        sign: Callable[[Iterable[StorageURI]], tuple[dict[StorageURI, ResourcePath], datetime]],
+    ):
+        super().__init__(uris)
+        self._sign = sign
+        self._cache, self._expiration = sign(self._uris)
+
+    _PADDING: ClassVar[timedelta] = timedelta(seconds=5)
+
+    def __getitem__(self, __key: StorageURI) -> ResourcePath:
+        if self._expiration + self._PADDING < datetime.now():
+            self._cache, self._expiration = self._sign(self.keys())
+        return self._cache[__key]
 
 
 class PersistentLimitedButler(LimitedButler):
@@ -36,17 +82,16 @@ class PersistentLimitedButler(LimitedButler):
     _datastore: Datastore
     """Datastore client object."""
 
-    @abstractmethod
     def _get_resource_paths(
         self, uris: Iterable[StorageURI], write: bool = False
-    ) -> dict[StorageURI, ResourcePath]:
+    ) -> Mapping[StorageURI, ResourcePath]:
         """Return `ResourcePath` objects usable for direct Datastore operations
         for the given possibly-relative URIs.
 
         This turns URIs into absolute URLs and will sign them if needed for the
         relevant datastore.
         """
-        raise NotImplementedError()
+        return PathMapping(frozenset(uris))
 
 
 class PersistentLimitedButlerConfig(ExtensionConfig):

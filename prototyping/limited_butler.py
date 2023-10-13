@@ -124,12 +124,9 @@ class LimitedButler(ABC):
         """
         raise NotImplementedError()
 
-    def put(self, obj: InMemoryDataset, ref: DatasetRef) -> DatasetRef:
+    def put(self, obj: InMemoryDataset, ref: DatasetRef) -> None:
         """Write a dataset given a DatasetRef with a fully-expanded data ID
         (but no Datastore records).
-
-        The returned DatasetRef will be further expanded to include the new
-        Datastore records as well.
 
         Notes
         -----
@@ -137,10 +134,9 @@ class LimitedButler(ABC):
         type and data ID, and its version of this overload will not require the
         `DatasetRef` to be fully expanded.
         """
-        (new_ref,) = self.put_many([(obj, ref)])
-        return new_ref
+        self.put_many([(obj, ref)])
 
     @abstractmethod
-    def put_many(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> Iterable[DatasetRef]:
+    def put_many(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> None:
         """Vectorized implementation of `put`."""
         raise NotImplementedError()

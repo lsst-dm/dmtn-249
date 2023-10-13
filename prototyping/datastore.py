@@ -9,7 +9,7 @@ from typing import Any, TypeAlias, TYPE_CHECKING, final
 
 from lsst.resources import ResourcePath
 
-from lsst.daf.butler import StoredDatastoreItemInfo, ddl
+from lsst.daf.butler import StoredDatastoreItemInfo, ddl, DatasetId
 from .extension_config import ExtensionConfig
 from .aliases import GetParameter, InMemoryDataset, DatastoreTableName, StorageURI
 from .artifact_transfer_request import ArtifactTransferRequest
@@ -177,9 +177,7 @@ class Datastore(ABC):
 
     @abstractmethod
     def put_many(
-        self,
-        arg: Iterable[tuple[InMemoryDataset, DatasetRef]],
-        /,
+        self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /, paths: Mapping[StorageURI, ResourcePath]
     ) -> None:
         """Write an in-memory object to this datastore.
 
@@ -188,13 +186,16 @@ class Datastore(ABC):
         arg
             Objects to write and the `DatasetRef` objects that should identify
             them.
+        paths
+            Mapping from possibly-relative URI to definitely-absolute,
+            signed-if-needed URL.
         """
         raise NotImplementedError()
 
     @abstractmethod
     def verify(
-        self, ref: DatasetRef, paths: Mapping[StorageURI, ResourcePath]
-    ) -> tuple[bool, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
+        self, refs: Iterable[DatasetRef]
+    ) -> Iterable[tuple[DatasetId, bool, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]]:
         """Test whether all artifacts are present for a dataset and return
         records that represent them.
 
@@ -204,22 +205,23 @@ class Datastore(ABC):
             Dataset to verify.  May or may not have datastore records attached;
             if records are attached, they must be consistent with the artifact
             content (e.g. if checksums are present, they should be checked).
-        paths : `~collections.abc.Mapping` [ `StorageURI`, `ResourcePath` ]
-            Mapping from possibly-relative URI to definitely-absolute,
-            signed-if-needed URL.
 
         Returns
         -------
-        present : `bool`
-            If all artifacts are present , `True`.  If no artifacts are
-            present, `False`.  If only some artifacts are present or any
-            artifact is corrupted an exception is raised.
-        records
-            Datastore records that should be attached to this `DatasetRef`.
-            These must be created from scratch if none were passed in (the
-            datastore may assume its configuration has not changed since the
-            artifact(s) were written) and maybe augmented if incomplete (e.g.
-            if sizes or checksums were absent and have now been calculated).
+        results : `~collections.abc.Iterable`
+            Result 3-tuples, each of which contains:
+
+            - ``dataset_id``: the ID of one of the given datasets.
+            - ``present``: if all artifacts for this dataset are present ,
+              `True`.  If no artifacts are present, `False` (if only some
+              artifacts are present or any artifact is corrupted an exception
+              is raised).
+            - ``records``: datastore records that should be attached to this
+              `DatasetRef`. These must be created from scratch if none were
+              passed in (the datastore may assume its configuration has not
+              changed since the artifact(s) were written) and maybe augmented
+              if incomplete (e.g. if sizes or checksums were absent and have
+              now been calculated).
         """
         raise NotImplementedError()
 

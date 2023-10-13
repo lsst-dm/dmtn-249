@@ -27,6 +27,7 @@ __all__ = (
 )
 
 from typing import Any, TypeAlias
+from lsst.resources import ResourcePath
 
 CollectionDocumentation: TypeAlias = str
 CollectionName: TypeAlias = str
@@ -40,5 +41,9 @@ GetParameter: TypeAlias = str
 InMemoryDataset: TypeAlias = Any
 DatastoreTableName: TypeAlias = str
 StorageClassName: TypeAlias = str
-StorageURI: TypeAlias = tuple[str, str]  # Datastore name, possibly-relative URI
+PossiblyRelativePath: TypeAlias = str
+DatastoreRoot: TypeAlias = ResourcePath
+StorageURI: TypeAlias = tuple[
+    DatastoreRoot | None, PossiblyRelativePath
+]  # Datastore name, possibly-relative URI
 TransferMode: TypeAlias = str

@@ -9,6 +9,7 @@ from lsst.daf.butler import (
     DataCoordinate,
     DataId,
     DataIdValue,
+    DatasetId,
     DimensionUniverse,
     StorageClass,
     DatasetType,
@@ -216,8 +217,15 @@ class Butler(PersistentLimitedButler):
         return result
 
     @overload
-    def put(self, obj: InMemoryDataset, ref: DatasetRef) -> DatasetRef:
-        # Signature is inherited, but here it accepts not-expanded refs.
+    def put(
+        self,
+        obj: InMemoryDataset,
+        ref: DatasetRef,
+        transaction_name: ArtifactTransactionName | None = None,
+    ) -> None:
+        # Signature is mostly inherited, but here it accepts not-expanded refs.
+        # If transaction_name is provided, concurrent calls with the same name
+        # pick a single winner, with the losers doing nothing.
         ...
 
     @overload
@@ -227,16 +235,27 @@ class Butler(PersistentLimitedButler):
         dataset_type: DatasetType | DatasetTypeName,
         data_id: DataId,
         *,
+        transaction_name: ArtifactTransactionName | None = None,
         storage_class: StorageClass | StorageClassName | None = None,
         run: CollectionName | None = None,
         **kwargs: DataIdValue,
-    ) -> DatasetRef:
+    ) -> None:
         # This overload is not inherited from LimitedButler, but it's unchanged
-        # from what we have now except for snake_case.
+        # from what we have now except for snake_case. If transaction_name is
+        # provided, concurrent calls with the same name pick a single winner,
+        # with the losers doing nothing.
         ...
 
     @final
-    def put(self, obj: InMemoryDataset, *args: Any, **kwargs: Any) -> DatasetRef:
+    def put(
+        self,
+        obj: InMemoryDataset,
+        *args: Any,
+        transaction_name: ArtifactTransactionName | None = None,
+        **kwargs: Any,
+    ) -> None:
+        # If transaction_name is provided, concurrent calls with the same name
+        # pick a single winner, with the losers doing nothing.
         raise NotImplementedError("TODO: implement here by delegating to resolve_dataset and put_many.")
 
     ###########################################################################
@@ -252,13 +271,49 @@ class Butler(PersistentLimitedButler):
     ###########################################################################
 
     @final
-    def put_many(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /) -> Iterable[DatasetRef]:
-        # Signature is inherited, but here it accepts not-expanded refs.
-        raise NotImplementedError("TODO")
+    def put_many(
+        self,
+        arg: Iterable[tuple[InMemoryDataset, DatasetRef]],
+        /,
+        transaction_name: ArtifactTransactionName | None = None,
+    ) -> None:
+        # Signature is inherited, but here it accepts not-expanded refs. If
+        # transaction_name is provided, concurrent calls with the same name
+        # pick a single winner, with the losers doing nothing.
+        from .put_transaction import PutTransaction
+
+        refs: dict[DatasetId, DatasetRef] = {}
+        objs: list[InMemoryDataset] = []
+        data_ids: dict[tuple[DataIdValue, ...], DataCoordinate] = {}
+        for obj, ref in arg:
+            refs[ref.id] = ref
+            data_ids[ref.dataId.values_tuple()] = ref.dataId
+            objs.append(obj)
+        # Expand the data IDs associated with all refs.
+        data_ids = {
+            data_id.values_tuple(): data_id for data_id in self.expand_data_coordinates(data_ids.values())
+        }
+        for ref in refs.values():
+            refs[ref.id] = dataclasses.replace(ref, dataId=data_ids[ref.dataId.values_tuple()])
+        # Open a transaction.
+        transaction = PutTransaction(refs=refs)
+        transaction_name, winner = self.begin_transaction(transaction, name=transaction_name)
+        if not winner:
+            # Another process already opened *exactly* this transaction; let
+            # them win by doing nothing.
+            return
+        uris = self._datastore.predict_new_uris(refs.values())
+        self._datastore.put_many(zip(objs, refs.values()), paths=self._get_resource_paths(uris))
+        self.commit(transaction_name)
 
     @final
     def transfer_artifacts_from(
-        self, origin: PersistentLimitedButler, refs: Iterable[DatasetRef], mode: str
+        self,
+        origin: PersistentLimitedButler,
+        refs: Iterable[DatasetRef],
+        *,
+        mode: str,
+        transaction_name: ArtifactTransactionName | None = None,
     ) -> None:
         """Transfer dataset artifacts from another butler to this one.
 
@@ -272,6 +327,11 @@ class Butler(PersistentLimitedButler):
             Transfer mode.  Note that `None` is not supported, because directly
             writing to a datastore-managed location without an open transaction
             is now illegal.
+        transaction_name : `str`, optional
+            Name of the transaction.  If provided, concurrent calls with the
+            same transaction will pick a single winner with the result doing
+            nothing.  The caller is responsible for ensuring all such calls
+            would actually do the same thing.
 
         Notes
         -----
@@ -292,17 +352,30 @@ class Butler(PersistentLimitedButler):
             origin_config=origin._config,
             refs=refs_dict,
         )
-        transaction_name, _ = self.begin_transaction(transaction)
+        transaction_name, winner = self.begin_transaction(transaction)
+        if not winner:
+            # Another process already opened *exactly* this transaction; let
+            # them win by doing nothing.
+            return
         self.commit(transaction_name)
 
     @final
-    def unstore_datasets(self, refs: Iterable[DatasetRef]) -> None:
+    def unstore_datasets(
+        self,
+        refs: Iterable[DatasetRef],
+        transaction_name: ArtifactTransactionName | None = None,
+    ) -> None:
         """Remove datasets from storage.
 
         Parameters
         ----------
         refs : `~collections.abc.Iterable` [ `DatasetRef` ]
             Datasets whose artifacts should be deleted.
+        transaction_name : `str`, optional
+            Name of the transaction.  If provided, concurrent calls with the
+            same transaction will pick a single winner with the result doing
+            nothing.  The caller is responsible for ensuring all such calls
+            would actually do the same thing.
 
         Notes
         -----
@@ -314,7 +387,11 @@ class Butler(PersistentLimitedButler):
         from .removal_transaction import RemovalTransaction
 
         transaction = RemovalTransaction(refs={ref.id: ref for ref in refs})
-        transaction_name, _ = self.begin_transaction(transaction)
+        transaction_name, winner = self.begin_transaction(transaction)
+        if not winner:
+            # Another process already opened *exactly* this transaction; let
+            # them win by doing nothing.
+            return
         self.commit(transaction_name)
 
     ###########################################################################
@@ -405,8 +482,8 @@ class Butler(PersistentLimitedButler):
             transaction name or ID.
         name
             Name of the transaction.  Should be prefixed with ``u/$USER`` for
-            regular users.  If not provided, defaults to something unique with
-            that prefix and the type of transaction.
+            regular users.  If not provided, defaults to something that is
+            guaranteed to be universally unique with that prefix.
 
         Returns
         -------
