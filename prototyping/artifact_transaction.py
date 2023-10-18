@@ -16,6 +16,7 @@ from lsst.utils.introspection import get_full_type_name
 from .aliases import CollectionName, DatastoreTableName, StorageURI
 from .datastore import Datastore
 from .raw_batch import RawBatch
+from .primitives import DatasetRef
 
 
 ArtifactTransactionName: TypeAlias = str
@@ -77,6 +78,16 @@ class ArtifactTransaction(ABC):
             objects (e.g. transfer manifests or datastore records).
         """
         raise NotImplementedError()
+
+    @property
+    def is_workspace(self) -> bool:
+        """Whether this transaction is associated with a workspace that allows
+        content to be added incrementally.
+        """
+        return False
+
+    def make_workspace_client(self, datastore: Datastore) -> Any:
+        return None
 
     @abstractmethod
     def get_operation_name(self) -> str:
@@ -175,6 +186,53 @@ class ArtifactTransaction(ABC):
         raise NotImplementedError()
 
     @abstractmethod
+    def revert_phase_one(
+        self,
+        datastore: Datastore,
+        paths: Mapping[StorageURI, ResourcePath],
+    ) -> None:
+        """Begin to revert this transaction.
+
+        This method will always be called by the client.
+
+        Parameters
+        ----------
+        datastore : `Datastore`
+            Datastore client for this data repository.
+        paths : `~collections.abc.Mapping` [ `str`, \
+                `~lsst.resources.ResourcePath` ]
+            Mapping from unsigned possibly-relative URI to absolute
+            possibly-signed URL.  Keys are the same as those returned by
+            `get_uris` for the resolution.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def revert_phase_two(
+        self,
+        datastore: Datastore,
+    ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
+        """Finish reverting this transaction.
+
+        This method will be called on the server in `RemoteButler`, and will
+        only be called after `commit_phase_one` has been called.
+
+        Parameters
+        ----------
+        datastore : `Datastore`
+            Datastore client for this data repository.
+
+        Returns
+        -------
+        final_batch
+            Batch of database-only modifications to execute when the
+            transaction is closed in the database.
+        records
+            Datastore records to insert into the database.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
     def abandon_phase_one(
         self,
         datastore: Datastore,
@@ -220,6 +278,60 @@ class ArtifactTransaction(ABC):
             Datastore records to insert into the database.
         """
         raise NotImplementedError()
+
+    def _verify_artifacts(
+        self,
+        datastore: Datastore,
+        refs: Mapping[DatasetId, DatasetRef],
+    ) -> tuple[
+        dict[DatastoreTableName, list[StoredDatastoreItemInfo]],
+        list[DatasetRef],
+        list[DatasetRef],
+        list[DatasetRef],
+    ]:
+        """Verify dataset refs using a datastore and classify them.
+
+        This is a convenience method typically called by at least two of a
+        transaction's (`commit_phase_two`, `revert_phase_two`,
+        `abandon_phase_two`).
+
+        Parameters
+        ----------
+        datastore : `Datastore`
+            Datastore to call `Datastore.verify` on.
+        refs : `~collections.abc.Mapping` [ `~lsst.daf.butler.DatasetId`, \
+                `DatasetRef` ]
+            Datasets to verify.
+
+        Returns
+        -------
+        records
+            Mapping from datastore table name to the records for that table,
+            for all datasets in ``present``.
+        present
+            List of datasets whose artifacts were verified successfully.
+        missing
+            List of datasets whose artifacts were fully absent.
+        corrupted
+            List of datasets whose artifacts were incomplete or invalid.
+        """
+        records: dict[DatastoreTableName, list[StoredDatastoreItemInfo]] = {
+            table_name: [] for table_name in datastore.tables.keys()
+        }
+        present = []
+        missing = []
+        corrupted = []
+        for dataset_id, valid, records_for_dataset in datastore.verify(refs.values()):
+            ref = refs[dataset_id]
+            if valid:
+                for table_name, records_for_table in records_for_dataset.items():
+                    records[table_name].extend(records_for_table)
+                present.append(ref)
+            elif valid is None:
+                missing.append(ref)
+            else:
+                corrupted.append(ref)
+        return records, present, missing, corrupted
 
 
 @final

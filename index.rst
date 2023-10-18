@@ -120,6 +120,9 @@ Direct subclasses :py:class:`LimitedButler` are expected to be useful primarily 
 Consistency Model
 =================
 
+Summary
+-------
+
 A full data repository has both a SQL *database* and artifact *storage* that are expected to remain consistent at all times.
 We define consistency as follows:
 
@@ -135,8 +138,9 @@ They typically contain information like the formatter class used to read and wri
 
 An *artifact transaction* is a limited-duration but persistent manifest of
 changes to be made to both the database and storage.
-All open artifact transactions are registered in the database and can be *committed* or *abandoned* to continue or (at least partially) undo an operation, even in the presence of unexpected hard errors (to the extent underlying the database and low-level storage is recoverable, of course).
-An artifact transaction does not correspond to a database transaction - in practice there will be one database transaction used when opening a transaction and another used when closing (committing/abandoning) it.
+All open artifact transactions are registered in the database and are closed by *committing*, *reverting*, or *abandoning* them (see :ref:`artifact-transaction-details`)
+
+An artifact transaction does not correspond to a database transaction - in practice there will be one database transaction used to open transaction and another used to close it.
 
 This consistency model means that we *only* write new artifacts with the following pattern:
 
@@ -144,22 +148,151 @@ This consistency model means that we *only* write new artifacts with the followi
 2. Perform writes to storage.
 3. Commit the transaction at the same time that datastore records are inserted.
 
-Deleting artifacts is not quite symmetric, because we do not expect this to be reversible at a low level.
-For these the pattern is:
+Deleting artifacts is not quite symmetric with writing them:
 
 1. Open a new artifact transaction and delete datastore records at the same time.
 2. Perform the actual artifact deletions.
-3. Commit the transaction (which does not modify datastore records in the database at all).
+3. Commit the transaction, leaving datastore records absent.
 
-Abandoning a deletion transaction would attempt to re-insert the datastore records for any artifacts that had not yet been deleted.
-
-While most artifact transactions will have very brief durations, and are persisted only for fault-tolerance, internal workspaces open an artifact transaction when created, and thy commit or abandon that transaction only when the workspace itself is committed or abandoned; this is what gives an internal workspace "permission" to write processig-output artifacts directly to data repository locations while deferring the associated database inserts.
+While most artifact transactions will have very brief durations, and are persisted only for fault-tolerance, internal workspaces open an artifact transaction when created, and they commit or abandon that transaction only when the workspace itself is committed or abandoned; this is what gives an internal workspace "permission" to write processing-output artifacts directly to data repository locations while deferring the associated database inserts.
 External workspaces create (and commit) an artifact transaction only when the processing is complete workspace is committed by transferring artifacts back to the data repository - from the perspective of data repository consistency, this is no different from any other transfer operation.
+
+.. _artifact-transaction-details:
+
+Artifact Transaction Details
+----------------------------
+
+Opening a transaction
+"""""""""""""""""""""
+
+Artifact transactions are opened by calling :py:meth:`Butler.begin_transaction` with an :py:class:`ArtifactTransaction` instance.
+This will frequently happen inside other butler methods, but :py:meth:`~Butler.begin_transaction` is a public method precisely so external code (such as the pipeline execution middleware) can define specialized transaction types.
+
+Open artifact transactions are represented in the repository database by two tables:
+
+.. code:: sql
+
+   CREATE TABLE artifact_transaction (
+      name VARCHAR PRIMARY KEY,
+      header JSON NOT NULL
+   );
+
+.. code:: sql
+
+   CREATE TABLE artifact_transaction_run (
+      transaction_name VARCHAR REFERENCES artifact_transaction (name),
+      run_name VARCHAR PRIMARY KEY REFERENCES collection (name)
+   );
+
+The ``artifact_transaction`` table has one entry for each open transaction.
+In addition to the transaction name, it holds a serialized description of the transaction (obtained from :py:meth:`ArtifactTransaction.get_header_data`) directly in its ``header`` column.
+
+The ``artifact_transaction_run`` table is a one-to-many relationship table that identifies the :py:attr:`~lsst.daf.butler.CollectionType.RUN` collections affected by that transaction and preventing multiple open transactions from attempting to modify the same datasets (via a primary key violation).
+This is a very coarse concurrency mechanism, but probably not a problematic one for the limited set of transactions (``put``, transfer/import/ingest, delete) we expect to support coming from untrusted users via ``RemoteButler``.
+It could be problematic for important use cases running in trusted contexts, like Prompt Processing and multi-site batch, where parallel transfers into the same :py:attr:`~lsst.daf.butler.CollectionType.RUN` may quite important.
+For these, ``DirectButler`` (only) could permit the :py:attr:`ArtifactTransaction.get_runs` method to return an empty set and not check the :py:attr:`~lsst.daf.butler.CollectionType.RUN` membership of datasets modified by the transaction when this is the case.
+
+The database inserts that open an artifact transaction occur within a single database transaction, and an :py:class:`ArtifactTransaction` implementation may specify via its :py:meth:`~ArtifactTransaction.get_initial_batch` and :py:meth:`~ArtifactTransaction.get_unstores` methods that other operations should happen in this transaction as well (see :ref:`use-case-details` for examples).
+
+The ``RemoteButler`` implementation of :py:meth:`Butler.begin_transaction` will call :py:meth:`~ArtifactTransaction.get_header_data` on the client and send this serialized form of the transaction to the Butler REST Server, which will reinstantiate the transaction object via :py:meth:`~ArtifactTransaction.from_header_data`.
+The server is responsible for checking whether the user is permitted to run this transaction (both its declared :py:attr:`~lsst.daf.butler.CollectionType.RUN` collections and the transaction type itself).
+
+Committing, reverting, or abandoning a transaction
+""""""""""""""""""""""""""""""""""""""""""""""""""
+
+A transaction can only be closed by calling :py:meth:`Butler.commit_transaction`, :py:meth:`~Butler.revert_transaction`, or :py:meth:`~Butler.abandon_transaction`.
+The commit operation attempts to accomplish the original goals of the transaction, raising (and keeping the transaction open) if it cannot fully succeed after doing as much as it can.
+Reverting is the opposite - the transaction attempts to undo any changes made by the transaction so far (including any made when opening it), and raises if this is impossible.
+Abandoning a transaction does the minimum amount of work to make the database and artifact storage consistent so that the transaction can be closed, and only raises if low-level database or artifact storage operations fail.
+
+These operations are delegated to :py:class:`ArtifactTransaction` methods with the same signatures and can perform the same kinds of low-level operations.
+Throughout the rest of this section we will refer only to "commit" methods, with the understanding that everything applies to the other operations as well.
+
+:py:meth:`Butler.commit_transaction` delegates first to :py:meth:`ArtifactTransaction.commit_phase_one` and then to :py:meth:`ArtifactTransaction.commit_phase_two` to do the real work.
+The implementation is split across two methods specifically for ``RemoteButler``; it allows
+
+- :py:meth:`~ArtifactTransaction.commit_phase_one` to be run in the client, which may be the only location where user files to be uploaded can be seen;
+
+- :py:meth:`~ArtifactTransaction.commit_phase_two` to be run on the server, which is the only place deletions can occur and consistency guarantees can be safely verified.
+
+Neither method is given the means to modify the repository database directly - instead, :py:meth:`Butler.commit_transaction` is responsible for performing the database operations specified by the return values of :py:meth:`~ArtifactTransaction.commit_phase_two`.
+This happens in the same database transaction as the deletions from the ``artifact_transaction`` and ``artifact_transaction_run`` tables that close the artifact transaction.
+
+.. _workspace-transactions:
+
+Workspace transactions
+""""""""""""""""""""""
+
+The set of datasets and related artifacts managed by an artifact transaction is usually fixed when the transaction is opened, allowing all dataset metadata needed to implement the transaction to be serialized to an ``artifact_transaction`` row at that time.
+A transaction can also indicate that new datasets will be added to the transaction over its lifetime by overriding :py:attr:`ArtifactTransaction.is_workspace` to :py:obj:`True`.
+This causes the transaction to be assigned a *workspace root*, a directory or directory-like location where the transaction can write files that describe these new datasets before the artifacts for those datasets are actually written.
+The driving use case is :py:class:`~lsst.pipe.base.PipelineTask` execution, for which these files will include the serialized :py:class:`~lsst.pipe.base.QuantumGraph`.
+At present we expect only ``DirectButler`` to support workspace transactions - using signed URLs for workspace files is a complication we'd prefer to avoid, and we want to limit the set of concrete artifact transaction types supported by ``RemoteButler`` to a few hopefully-simple critical ones anyway.
+
+A workspace transaction may also provide access to a transaction-defined client object by implementing :py:meth:`ArtifactTransaction.make_workspace_client`; this can be used to provide a higher-level interface for adding datasets (like building and executing quantum graphs).
+User code should obtain a client instance by calling :py:meth:`Butler.make_workspace_client` with the transaction name.
+
+When a workspace transaction is opened, the serialized transaction is written to a JSON file in the workspace as well as the ``artifact_transaction`` database table.
+This allows :py:meth:`Butler.make_workspace_client` to almost always avoid any database or server calls (it is a `classmethod`, so even :py:class:`Butler` startup server calls are unnecessary).
+If the transaction JSON file does not exist, :py:meth:`Butler.make_workspace_client` *will* have to query the ``artifact_transaction`` table to see if the transaction does, and recreate the file if it does.
+This guards against two rare failure modes in workspace construction:
+
+- When a workspace transaction is opened, we register the transaction with the database before creating the workspace root and the transaction JSON file there; this lets us detect concurrent attempts to open the same transaction and ensure only one of those attempts tries to perform the workspace writes.
+  But it also makes it possible that a failure will occur after the transaction has already been registered, leaving the workspace root missing.
+
+- When a workspace transaction is closed, we delete the transaction JSON file just before removing the transaction from the database.
+  This prevents calls to :py:meth:`Butler.make_workspace_client` from succeeding during or after its deletion (since deleting the transaction JSON file can fail).
+
+This scheme does not fully protect against concurrency issues, which are still ultimately left to transaction and workspace client implementations and the higher-level code that uses them.
+For example, a workspace client obtained before the transaction is closed can still write new workspace files and datastore artifacts without any way of knowing that the transaction has closed
+Our goal is to provide enough in the way of concurrency primitives for those implementations to work efficiently and safely in parallel.
+
+The workspace root will be recursively deleted by the :py:class:`Butler` after its transaction closes, with the expectation that its contents will have been translated into regular database or artifacts (or are intentionally being dropped).
+This can only be done after the database rows representing the transaction have been removed, since we need preserve the workspace state in case the database transaction fails.
+In the rare case that workspace root deletion fails after the transaction has been removed from the database, we still consider the transaction closed, and we provide :py:meth:`Butler.vacuum_workspaces` as a way to scan for and remove those orphaned workspace roots.
+
+Retries and fault tolerance
+"""""""""""""""""""""""""""
+
+If an error occurs while a transaction is open - either before one of the closing methods is called or before one of the closing methods completes without raising - the serialized transaction description remains in either the ``artifact_transaction`` table.
+This description is required to contain enough information (e.g. a list of all ``DatasetRefs``) to abandon the transaction, with the implementation typically calling :py:class:`Datastore.verify` on the datasets it manages, in order to:
+
+- insert datastore records for those that are present;
+- delete artifacts that are corrupted or incomplete;
+- mark as unstored (by leaving no datastore records in the database) for any whose artifacts are absent.
+
+This leaves the data repository in a consistent state while allowing the transaction to be closed, while minimizing expensive file-artifact operations.
+Since abandoning never requires client-side information such as an in-memory object or client-side files, user transactions that are left open too long can always be abandoned by administrators.
+
+Artifact transactions are encouraged to support resumption of "commit" and "revert" as well, but these are not always possible (usually one of the two will be; see :ref:`use-case-details` for examples).
+
+The artifact transaction system relies on low-level database and artifact storage having their own mechanisms to guard against corruption and data loss (e.g. backups, replication, etc.), and it assumes that the data committed by successful database transactions and successful artifact writes can be always restored by those low-level mechanisms.
+In both cases we consider the artifact transaction and its associated workspace to not be present in the repository, but files and/or directories associated with them are present and need to be cleaned up at some point.
+One piece of our solution to this problem is the :py:meth:`Butler.vacuum_workspaces` method, which can be run periodically to scan valid workspace paths and identify those not associated with a database entry.
 
 .. _use-case-details:
 
 Use Case Details
 ================
+
+.. _use-case-butler-put:
+
+``Butler.put``
+--------------
+
+TODO
+
+.. _use-case-removing-artifacts:
+
+Removing artifacts
+------------------
+
+TODO
+
+.. _use-case-transferring-artifacts:
+
+Transferring artifacts
+----------------------
 
 TODO
 
@@ -188,17 +321,23 @@ Prototype Code
          :language: py
          :pyobject: Butler.begin_transaction
 
-   .. py:method:: commit
+   .. py:method:: commit_transaction
 
       .. literalinclude::  prototyping/butler.py
          :language: py
-         :pyobject: Butler.commit
+         :pyobject: Butler.commit_transaction
 
-   .. py:method:: abandon
+   .. py:method:: revert_transaction
 
       .. literalinclude::  prototyping/butler.py
          :language: py
-         :pyobject: Butler.abandon
+         :pyobject: Butler.revert_transaction
+
+   .. py:method:: abandon_transaction
+
+      .. literalinclude::  prototyping/butler.py
+         :language: py
+         :pyobject: Butler.abandon_transaction
 
    .. py:method:: list_transactions
 
@@ -206,11 +345,17 @@ Prototype Code
          :language: py
          :pyobject: Butler.list_transactions
 
-   .. py:method:: vacuum_transactions
+   .. py:method:: make_workspace_client
 
       .. literalinclude::  prototyping/butler.py
          :language: py
-         :pyobject: Butler.vacuum_transactions
+         :pyobject: Butler.make_workspace_client
+
+   .. py:method:: vacuum_workspaces
+
+      .. literalinclude::  prototyping/butler.py
+         :language: py
+         :pyobject: Butler.vacuum_workspaces
 
 .. py:class:: Datastore
 
@@ -269,11 +414,11 @@ Prototype Code
          :language: py
          :pyobject: Datastore.deserialize_transfer_to
 
-   .. py:method:: put
+   .. py:method:: put_many
 
       .. literalinclude:: prototyping/datastore.py
          :language: py
-         :pyobject: Datastore.put
+         :pyobject: Datastore.put_many
 
    .. py:method:: verify
 
@@ -300,6 +445,18 @@ Prototype Code
       .. literalinclude:: prototyping/artifact_transaction.py
          :language: py
          :pyobject: ArtifactTransaction.get_header_data
+
+   .. py:attribute:: is_workspace
+
+      .. literalinclude:: prototyping/artifact_transaction.py
+         :language: py
+         :pyobject: ArtifactTransaction.is_workspace
+
+   .. py:method:: make_workspace_client
+
+      .. literalinclude:: prototyping/artifact_transaction.py
+         :language: py
+         :pyobject: ArtifactTransaction.make_workspace_client
 
    .. py:method:: get_operation_name
 
@@ -342,6 +499,18 @@ Prototype Code
       .. literalinclude:: prototyping/artifact_transaction.py
          :language: py
          :pyobject: ArtifactTransaction.commit_phase_two
+
+   .. py:method:: revert_phase_one
+
+      .. literalinclude:: prototyping/artifact_transaction.py
+         :language: py
+         :pyobject: ArtifactTransaction.revert_phase_one
+
+   .. py:method:: revert_phase_two
+
+      .. literalinclude:: prototyping/artifact_transaction.py
+         :language: py
+         :pyobject: ArtifactTransaction.revert_phase_two
 
    .. py:method:: abandon_phase_one
 

@@ -74,19 +74,32 @@ class RemovalTransaction(pydantic.BaseModel, ArtifactTransaction):
         self,
         datastore: Datastore,
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        records: dict[DatastoreTableName, list[StoredDatastoreItemInfo]] = {
-            table_name: [] for table_name in datastore.tables.keys()
-        }
-        for dataset_id, present, records_for_dataset in datastore.verify(self.refs.values()):
-            ref = self.refs[dataset_id]
-            if present:
-                for table_name, records_for_table in records_for_dataset.items():
-                    # TODO: this extend will lead to duplicates when multiple
-                    # datasets are part of one file, e.g. DECam raws.  But
-                    # deletion of those is already problematic (in this
-                    # prototype) in that we don't have a way to check that all
-                    # such datasets are being deleted together.
-                    records[table_name].extend(records_for_table)
-            else:
-                warnings.warn(f"{ref} has already been deleted; transaction cannot be fully abandoned.")
+        records, present, _, corrupted = self._verify_artifacts(datastore, self.refs)
+        for ref in present:
+            warnings.warn(f"{ref} was not deleted and will remain stored.")
+        for ref in corrupted:
+            warnings.warn(f"{ref} was corrupted and will be removed.")
+        datastore.unstore(corrupted)
+        return RawBatch(), records
+
+    def revert_phase_one(
+        self,
+        datastore: Datastore,
+        paths: Mapping[StorageURI, ResourcePath],
+    ) -> None:
+        # When reverting a removal, all we're doing is verifying that
+        # artifacts still exist, and we always do verification on the server,
+        # so there's nothing to do on the client.
+        pass
+
+    def revert_phase_two(
+        self,
+        datastore: Datastore,
+    ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
+        records, _, missing, corrupted = self._verify_artifacts(datastore, self.refs)
+        if missing or corrupted:
+            raise RuntimeError(
+                f"{len(missing)} dataset(s) have already been deleted and {len(corrupted)} had missing or "
+                f"invalid artifacts; transaction must be committed or abandoned."
+            )
         return RawBatch(), records

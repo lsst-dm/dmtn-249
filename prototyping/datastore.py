@@ -195,7 +195,7 @@ class Datastore(ABC):
     @abstractmethod
     def verify(
         self, refs: Iterable[DatasetRef]
-    ) -> Iterable[tuple[DatasetId, bool, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]]:
+    ) -> Iterable[tuple[DatasetId, bool | None, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]]:
         """Test whether all artifacts are present for a dataset and return
         records that represent them.
 
@@ -212,10 +212,10 @@ class Datastore(ABC):
             Result 3-tuples, each of which contains:
 
             - ``dataset_id``: the ID of one of the given datasets.
-            - ``present``: if all artifacts for this dataset are present ,
-              `True`.  If no artifacts are present, `False` (if only some
-              artifacts are present or any artifact is corrupted an exception
-              is raised).
+            - ``valid``: if all artifacts for this dataset are present ,
+              `True`.  If no artifacts are present, `None`.  If only some
+              of the needed artifacts are present or any artifact is corrupted,
+              `False`.
             - ``records``: datastore records that should be attached to this
               `DatasetRef`. These must be created from scratch if none were
               passed in (the datastore may assume its configuration has not

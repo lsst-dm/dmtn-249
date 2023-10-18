@@ -66,21 +66,34 @@ class PutTransaction(pydantic.BaseModel, ArtifactTransaction):
         self,
         datastore: Datastore,
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        records: dict[DatastoreTableName, list[StoredDatastoreItemInfo]] = {
-            table_name: [] for table_name in datastore.tables.keys()
-        }
-        batch = RawBatch()
-        for dataset_id, present, records_for_dataset in datastore.verify(self.refs.values()):
-            ref = self.refs[dataset_id]
-            if present:
-                for table_name, records_for_table in records_for_dataset.items():
-                    records[table_name].extend(records_for_table)
-            else:
-                warnings.warn(f"{ref} was not successfully written and its registration will be reverted.")
-                batch.dataset_removals.add(ref.id)
-        return batch, records
+        records, _, missing, corrupted = self._verify_artifacts(datastore, self.refs)
+        if missing or corrupted:
+            raise RuntimeError(
+                f"{len(missing)} dataset(s) were not written and {len(corrupted)} had missing or "
+                f"invalid artifacts; transaction must be reverted or abandoned."
+            )
+        return RawBatch(), records
 
     def abandon_phase_one(
+        self,
+        datastore: Datastore,
+        paths: Mapping[StorageURI, ResourcePath],
+    ) -> None:
+        pass
+
+    def abandon_phase_two(
+        self,
+        datastore: Datastore,
+    ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
+        records, _, missing, corrupted = self._verify_artifacts(datastore, self.refs)
+        for ref in missing:
+            warnings.warn(f"{ref} was not written and will remain unstored.")
+        for ref in corrupted:
+            warnings.warn(f"{ref} was not fully written and will be unstored.")
+        datastore.unstore(corrupted)
+        return RawBatch(), records
+
+    def revert_phase_one(
         self,
         datastore: Datastore,
         paths: Mapping[StorageURI, ResourcePath],
@@ -89,7 +102,7 @@ class PutTransaction(pydantic.BaseModel, ArtifactTransaction):
         # URLs.
         pass
 
-    def abandon_phase_two(
+    def revert_phase_two(
         self,
         datastore: Datastore,
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:

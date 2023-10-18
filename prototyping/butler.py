@@ -20,7 +20,7 @@ from lsst.daf.butler import (
 from lsst.daf.butler.registry import CollectionSummary
 from lsst.daf.butler.registry import RegistryDefaults as ButlerClientDefaults
 from lsst.daf.butler.registry.interfaces import CollectionRecord
-from lsst.resources import ResourcePath
+from lsst.resources import ResourcePath, ResourcePathExpression
 
 from .aliases import (
     CollectionPattern,
@@ -304,7 +304,7 @@ class Butler(PersistentLimitedButler):
             return
         uris = self._datastore.predict_new_uris(refs.values())
         self._datastore.put_many(zip(objs, refs.values()), paths=self._get_resource_paths(uris))
-        self.commit(transaction_name)
+        self.commit_transaction(transaction_name)
 
     @final
     def transfer_artifacts_from(
@@ -357,7 +357,7 @@ class Butler(PersistentLimitedButler):
             # Another process already opened *exactly* this transaction; let
             # them win by doing nothing.
             return
-        self.commit(transaction_name)
+        self.commit_transaction(transaction_name)
 
     @final
     def unstore_datasets(
@@ -392,7 +392,7 @@ class Butler(PersistentLimitedButler):
             # Another process already opened *exactly* this transaction; let
             # them win by doing nothing.
             return
-        self.commit(transaction_name)
+        self.commit_transaction(transaction_name)
 
     ###########################################################################
     #
@@ -476,10 +476,9 @@ class Butler(PersistentLimitedButler):
         cls
             Transaction type object.
         transaction
-            Object that knows how to commit or abandon the transaction, can
-            [de]serialize itself from JSON data, and provide information about
-            what it will modify.  Note that this instance cannot know the
-            transaction name or ID.
+            Object that knows how to commit, revert, or abandon the
+            transaction can [de]serialize itself from JSON data, and provide
+            information about what it will modify.
         name
             Name of the transaction.  Should be prefixed with ``u/$USER`` for
             regular users.  If not provided, defaults to something that is
@@ -488,56 +487,50 @@ class Butler(PersistentLimitedButler):
         Returns
         -------
         name
-            Name fo the transaction.
+            Name of the transaction.
         just_opened
             Whether this process actually opened the transaction (`True`) vs.
             finding an already-open identical one (`False`).
-
-        Notes
-        -----
-        This method begins by calling `ArtifactTransaction.get_header_data` and
-        saving a `ArtifactTransactionHeader` instance with it to a
-        config-defined location.  It then performs several database operations
-        in a single transaction:
-
-        - It inserts a row into a ``artifact_transaction`` table, generating
-          the transaction ID either as an autoincrement primary key (unless we
-          generate it as a UUID earlier).
-
-        - It inserts rows into the ``artifact_transaction_run`` table,
-          effectively locking those runs against writes from other artifact
-          transactions (but not database transactions involving registry-only
-          state).  This fails (due to unique constraints in
-          ``artifact_transaction_run``) if those runs are already locked.
-
-        - It removes all datastore records associated with the datasets in
-          `transaction.unstored`.
-
-        - It executes `transaction.initial_batch`.
-
-        If the database commit fails or is never attempted, the butler should
-        attempt to remove the header it just saved, but we cannot count on this
-        always occurring. Butler implementations must hence ignore headers with
-        no associated database entry until given an opportunity to clean them
-        up via `vacuum_transactions`.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def commit(self, name: ArtifactTransactionName, transaction: ArtifactTransaction | None = None) -> None:
+    def commit_transaction(self, name: ArtifactTransactionName) -> None:
         """Commit an existing transaction.
 
-        Most users should only need to call this method when a previous
-        (often implicit) commit failed and they want to retry.
+        Most users should only need to call this method when a previous (often
+        implicit) commit failed and they want to retry.
+
+        This method will raise an exception and leave the transaction open if
+        it cannot fully perform all of the operations originally included in
+        the transaction.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def abandon(self, name: ArtifactTransactionName, transaction: ArtifactTransaction | None = None) -> None:
-        """Commit an existing transaction.
+    def revert_transaction(self, name: ArtifactTransactionName) -> bool:
+        """Revert an existing transaction.
 
-        Most users should only need to call this method when a previous
-        (often implicit) commit failed and they want to retry.
+        Most users should only need to call this method when a previous (often
+        implicit) commit failed and they want to retry.
+
+        This method will raise an exception and leave the transaction open if
+        it cannot fully undo any modifications made by the transation since it
+        was opened.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def abandon_transaction(self, name: ArtifactTransactionName) -> None:
+        """Abandon an existing transaction.
+
+        Most users should only need to call this method when a previous (often
+        implicit) commit failed and they want to retry.
+
+        This method will only raise (and leave the transaction) open if it
+        encounters a low-level error, but it may leave the transaction's
+        operations incomplete (with warnings logged).  Repository invariants
+        will still be satisfied.
         """
         raise NotImplementedError()
 
@@ -558,10 +551,45 @@ class Butler(PersistentLimitedButler):
         """
         raise NotImplementedError()
 
+    @classmethod
     @abstractmethod
-    def vacuum_transactions(self) -> None:
-        """Clean up any empty directories and persisted transaction headers not
-        associated with an active transaction.
+    def make_workspace_client(
+        cls, config: ButlerConfig | ResourcePathExpression, name: ArtifactTransactionName
+    ) -> Any:
+        """Make a workspace client for the given transaction.
+
+        Notes
+        -----
+        This is a `classmethod` to allow it to avoid the need to connect to a
+        database or REST server (as `Butler` construction typically does):
+        workspace transactions are serialized to a JSON file whose path should
+        be deterministic given butler config and the transaction name, and the
+        `Datastore` should also be constructable from butler config alone.
+
+        If the serialized transaction does not exist at the expected location,
+        this method will have to connect to a server to see if the transaction
+        exists there; if it does, the serialized transaction will be written to
+        the file location for future calls.  If it does not, the transaction
+        has been closed an an exception is raised.  This behavior guards
+        against unexpected failures in either opening or closing a workspace
+        transaction.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def vacuum_workspaces(self) -> None:
+        """Clean up any workspace directories not associated with an active
+        transaction.
+
+        This method is only needed because:
+
+         - we have to write transaction headers to workspace roots before
+           inserting the transaction into the database when it is opened;
+         - we have to delete workspace roots after deleting the transaction
+           from the database on commit or abandon;
+
+        and in both cases we can't guarantee we won't be interrupted.  But
+        vacuums should only be needed extremely rarely.
         """
         raise NotImplementedError()
 

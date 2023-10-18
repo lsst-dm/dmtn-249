@@ -4,6 +4,7 @@ __all__ = ("TransferTransaction",)
 
 import dataclasses
 import uuid
+import warnings
 from collections.abc import Mapping, Set
 from typing import Self, Any, TypedDict
 
@@ -84,16 +85,29 @@ class TransferTransaction(ArtifactTransaction):
         self,
         datastore: Datastore,
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        records: dict[DatastoreTableName, list[StoredDatastoreItemInfo]] = {
-            table_name: [] for table_name in datastore.tables.keys()
-        }
-        for dataset_id, present, records_for_dataset in datastore.verify(self.refs.values()):
-            ref = self.refs[dataset_id]
-            if not present:
-                raise RuntimeError(f"Artifacts for {ref} were not transferred.")
-            for table_name, records_for_table in records_for_dataset.items():
-                records[table_name].extend(records_for_table)
+        records, _, missing, corrupted = self._verify_artifacts(datastore, self.refs)
+        if missing or corrupted:
+            raise RuntimeError(
+                f"{len(missing)} dataset(s) have were not transferred and {len(corrupted)} had missing or "
+                f"invalid artifacts."
+            )
         return RawBatch(), records
+
+    def revert_phase_one(
+        self,
+        datastore: Datastore,
+        paths: Mapping[StorageURI, ResourcePath],
+    ) -> None:
+        # Can't do anything on client, since we can't delete through signed
+        # URLs.
+        pass
+
+    def revert_phase_two(
+        self,
+        datastore: Datastore,
+    ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
+        datastore.unstore(self.refs.values())
+        return RawBatch(), {}
 
     def abandon_phase_one(
         self,
@@ -108,5 +122,10 @@ class TransferTransaction(ArtifactTransaction):
         self,
         datastore: Datastore,
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        datastore.unstore(self.refs.values())
-        return RawBatch(), {}
+        records, _, missing, corrupted = self._verify_artifacts(datastore, self.refs)
+        for ref in missing:
+            warnings.warn(f"{ref} was not transferred and will remain stored.")
+        for ref in corrupted:
+            warnings.warn(f"{ref} was corrupted and will be removed.")
+        datastore.unstore(corrupted)
+        return RawBatch(), records
