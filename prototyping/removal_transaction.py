@@ -21,7 +21,10 @@ if TYPE_CHECKING:
 
 
 class RemovalTransaction(pydantic.BaseModel, ArtifactTransaction):
+    """An artifact transaction implementation that removes datasets."""
+
     refs: dict[uuid.UUID, DatasetRef]
+    purge: bool
 
     @classmethod
     def from_header_data(
@@ -58,7 +61,10 @@ class RemovalTransaction(pydantic.BaseModel, ArtifactTransaction):
         datastore: Datastore,
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         datastore.unstore(self.refs.values())
-        return RawBatch(), {}
+        batch = RawBatch()
+        if self.purge:
+            batch.dataset_removals.update(self.refs.keys())
+        return batch, {}
 
     def abandon_phase_one(
         self,
@@ -74,7 +80,7 @@ class RemovalTransaction(pydantic.BaseModel, ArtifactTransaction):
         self,
         datastore: Datastore,
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        records, present, _, corrupted = self._verify_artifacts(datastore, self.refs)
+        records, present, _, corrupted = self.verify_artifacts(datastore, self.refs)
         for ref in present:
             warnings.warn(f"{ref} was not deleted and will remain stored.")
         for ref in corrupted:
@@ -96,7 +102,7 @@ class RemovalTransaction(pydantic.BaseModel, ArtifactTransaction):
         self,
         datastore: Datastore,
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        records, _, missing, corrupted = self._verify_artifacts(datastore, self.refs)
+        records, _, missing, corrupted = self.verify_artifacts(datastore, self.refs)
         if missing or corrupted:
             raise RuntimeError(
                 f"{len(missing)} dataset(s) have already been deleted and {len(corrupted)} had missing or "

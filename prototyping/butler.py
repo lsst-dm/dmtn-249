@@ -37,6 +37,12 @@ from .persistent_limited_butler import PersistentLimitedButler, PersistentLimite
 from .primitives import DatasetRef
 
 
+class UnfinishedTransactionError(RuntimeError):
+    """Exception raised when an operation failed while leaving an
+    artifact transaction open.
+    """
+
+
 class Butler(PersistentLimitedButler):
     """Base class for full clients of butler data repositories."""
 
@@ -271,12 +277,7 @@ class Butler(PersistentLimitedButler):
     ###########################################################################
 
     @final
-    def put_many(
-        self,
-        arg: Iterable[tuple[InMemoryDataset, DatasetRef]],
-        /,
-        transaction_name: ArtifactTransactionName | None = None,
-    ) -> None:
+    def put_many(self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]]) -> None:
         # Signature is inherited, but here it accepts not-expanded refs. If
         # transaction_name is provided, concurrent calls with the same name
         # pick a single winner, with the losers doing nothing.
@@ -297,14 +298,61 @@ class Butler(PersistentLimitedButler):
             refs[ref.id] = dataclasses.replace(ref, dataId=data_ids[ref.dataId.values_tuple()])
         # Open a transaction.
         transaction = PutTransaction(refs=refs)
-        transaction_name, winner = self.begin_transaction(transaction, name=transaction_name)
-        if not winner:
-            # Another process already opened *exactly* this transaction; let
-            # them win by doing nothing.
-            return
-        uris = self._datastore.predict_new_uris(refs.values())
-        self._datastore.put_many(zip(objs, refs.values()), paths=self._get_resource_paths(uris))
-        self.commit_transaction(transaction_name)
+        transaction_name, _ = self.begin_transaction(transaction)
+        try:
+            uris = self._datastore.predict_new_uris(refs.values())
+            self._datastore.put_many(zip(objs, refs.values()), paths=self._get_resource_paths(uris))
+            self.commit_transaction(transaction_name)
+        except BaseException as main_err:
+            try:
+                self.revert_transaction(transaction_name)
+            except BaseException:
+                raise UnfinishedTransactionError(
+                    "Dataset write failed (see chained exception for details) and could not be reverted. "
+                    f"Artifact transaction {transaction_name!r} must be manually committed, reverted, "
+                    "or abandoned after any low-level problems with the repository have been addressed."
+                ) from main_err
+            raise
+
+    @final
+    def remove_datasets(
+        self,
+        refs: Iterable[DatasetRef],
+        purge: bool = False,
+    ) -> None:
+        """Remove datasets.
+
+        Parameters
+        ----------
+        refs : `~collections.abc.Iterable` [ `DatasetRef` ]
+            Datasets whose artifacts should be deleted.
+        purge : `bool`, optional
+            Whether to un-register datasets in addition to removing their
+            stored artifacts.
+        transaction_name : `str`, optional
+            Name of the transaction.  If provided, concurrent calls with the
+            same transaction will pick a single winner with the result doing
+            nothing.  The caller is responsible for ensuring all such calls
+            would actually do the same thing..
+        """
+        from .removal_transaction import RemovalTransaction
+
+        transaction = RemovalTransaction(
+            refs={ref.id: ref for ref in self.expand_existing_dataset_refs(refs)}, purge=purge
+        )
+        transaction_name, _ = self.begin_transaction(transaction)
+        try:
+            self.commit_transaction(transaction_name)
+        except BaseException as main_err:
+            try:
+                self.revert_transaction(transaction_name)
+            except BaseException:
+                raise UnfinishedTransactionError(
+                    "Dataset removal failed (see chained exception for details) and could not be reverted. "
+                    f"Artifact transaction {transaction_name!r} must be manually committed, reverted, "
+                    "or abandoned after any low-level problems with the repository have been addressed."
+                ) from main_err
+            raise
 
     @final
     def transfer_artifacts_from(
@@ -352,41 +400,6 @@ class Butler(PersistentLimitedButler):
             origin_config=origin._config,
             refs=refs_dict,
         )
-        transaction_name, winner = self.begin_transaction(transaction)
-        if not winner:
-            # Another process already opened *exactly* this transaction; let
-            # them win by doing nothing.
-            return
-        self.commit_transaction(transaction_name)
-
-    @final
-    def unstore_datasets(
-        self,
-        refs: Iterable[DatasetRef],
-        transaction_name: ArtifactTransactionName | None = None,
-    ) -> None:
-        """Remove datasets from storage.
-
-        Parameters
-        ----------
-        refs : `~collections.abc.Iterable` [ `DatasetRef` ]
-            Datasets whose artifacts should be deleted.
-        transaction_name : `str`, optional
-            Name of the transaction.  If provided, concurrent calls with the
-            same transaction will pick a single winner with the result doing
-            nothing.  The caller is responsible for ensuring all such calls
-            would actually do the same thing.
-
-        Notes
-        -----
-        For simplicity this method should be deleted from datastore storage but
-        not the database.  The extension to more realistic cases just involves
-        constructing a `RawBatch` instance and passing it through the
-        transaction object.
-        """
-        from .removal_transaction import RemovalTransaction
-
-        transaction = RemovalTransaction(refs={ref.id: ref for ref in refs})
         transaction_name, winner = self.begin_transaction(transaction)
         if not winner:
             # Another process already opened *exactly* this transaction; let

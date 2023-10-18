@@ -280,14 +280,57 @@ Use Case Details
 ``Butler.put``
 --------------
 
-TODO
+The prototype implementation of :py:class:`Butler.put_many` (a new API we envision ``put`` delegating to) begins by expanding the data IDs of all of the given :py:class:`~lsst.daf.butler.DatasetRef` objects is given.
+A dictionary mapping UUID to :py:class:`~lsst.daf.butler.DatasetRef` is then used to construct a :py:class:`PutTransaction` instance to pass to :py:meth:`Butler.begin_transaction`.
+
+The serialized form of this transaction is just the mapping of :py:class:`~lsst.daf.butler.DatasetRef` objects.
+In this case the transaction is itself a pydantic model, which is a nice pattern for simplification when it works.
+The :py:meth:`~ArtifactTransaction.get_initial_batch` implementation for this transaction includes the registration of the new datasets.
+This registration will be performed in the same database transaction that registers the artifact transaction, causing it to fail early and prevent the transaction from ever being opened if this violates a constraint, such as an invalid data ID value or a ``{dataset type, data ID, collection}`` uniqueness failure.
+If the artifact transaction is opened successfully, the new datasets will be present in the database without datastore records and hence (to queries that do not look specifically at this transaction) appear to be unstored for the duration of the transaction.
+
+After the transaction has been opened, :py:class:`Butler.put_many` calls :py:meth:`Datastore.predict_new_uris` and ``Butler._get_resource_paths`` to obtain all signed URLs needed for the writes.
+In ``DirectButler``, ``_get_resource_paths`` just concatenates the datastore root with the relative path instead.
+These URLs are passed to :py:meth:`Datastore.put_many` to write the actual artifacts directly to their permanent locations.
+If these datastore operations succeed, :py:meth:`Butler.commit_transaction` is called.
+This calls the transaction's :py:meth:`~ArtifactTransaction.commit_phase_one` (always in the client) and :py:meth:`~ArtifactTransaction.commit_phase_two` (on the server for ``RemoteButler``, in the client in ``DirectButler``) methods.
+The first does nothing in this case, while the latter calls uses :py:class:`Datastore.verify` on all datasets in the transaction.
+Because these :py:class:`~lsst.daf.butler.DatasetRef` objects do not have datastore records attached, :py:class:`Datastore.verify` is responsible for generating them (e.g. computing checksums and sizes) as well as checking that these artifacts all exist.
+The datastore records are returned to :py:meth:`Butler.commit_transaction`, which inserts them into the database as it closes the transaction.
+
+All operations after the transaction's opening occur in a ``try`` block that calls :py:class:`Butler.revert_transaction` if an exception is raised.
+The :py:meth:`~ArtifactTransaction.revert_phase_one` implementation for :py:class:`PutTransaction` again does nothing, while :py:meth:`~ArtifactTransaction.revert_phase_two` calls :py:meth:`Datastore.unstore` to remove any artifacts that may have been written.
+If this succeeds, it provides strong exception safety; the repository is left in the same condition it was before the transaction was opened.
+If it fails - as would occur if the database or server became unavailable or artifact storage became unwriteable - a special exception is raised (chained to the original error) notifying the user that the transaction has been left open and must be cleaned up manually.
+
+In the case of :py:class:`PutTransaction`, a revert should always be possible as long as the database and artifact storage systems are working normally.
+As required, an abandon implementation is also provided.
+This does nothing in :py:meth:`~ArtifactTransaction.abandon_phase_one` and verifies datasets in :py:meth:`~ArtifactTransaction.abandon_phase_two` to insert datastore records for only those datasets whose artifacts had already been written.
 
 .. _use-case-removing-artifacts:
 
 Removing artifacts
 ------------------
 
-TODO
+The prototype includes a :py:meth:`Butler.remove_datasets` method that can either fully remove datasets (``purge=True``) or merely unstore them (``purge=False``).
+This method begins by expanding all given :py:class:`~lsst.daf.butler.DatasetRef` objects, which includes both expanding their data IDs and attaching existing datastore records.
+These are used to construct and begin a :py:class:`RemovalTransaction`.
+The serialized form of this transaction is again a mapping of :py:class:`~lsst.daf.butler.DatasetRef` objects, along with the boolean ``purge`` flag.
+
+The :py:class:`RemovalTransaction` :py:class:`~ArtifactTransaction.get_unstores` implementation returns the UUIDs of all datasets to be removed, which causes all datastore records for those datasets to be removed in the same database transaction that begins the artifact transaction.
+Its  :py:class:`~ArtifactTransaction.get_initial_batch` does not specify that datasets are to be unregistered at this time, however, even if ``purge=True``.
+Mirroring :py:class:`PutTransaction`, we want the datasets managed by the artifact transaction to appear as registered but unstored while the artifact transaction is open.
+
+In this case there is nothing to do with the transaction after it has been opened besides commit it.
+The :py:meth:`~ArtifactTransaction.commit_phase_one` implementation does nothing, since we cannot delete artifacts through signed URLs and hence cannot in general perform deletions on the client (in fact, all "phase one" methods on this transaction do nothing, because we do not call :py:meth:`Datastore.verify` on the client, either).
+The :py:meth:`~ArtifactTransaction.commit_phase_two` implementation delegates to :py:meth:`Datastore.unstore` to actually remove all artifacts, and the batch of database operations it returns includes de-registration of the datasets if and only if ``purge=True``, so that the datasets are fully deleted from the database when the transaction is closed.
+
+If the commit operation fails, a revert is attempted in order to try to provide strong exception safety, but this will frequently fail, since it requires all artifacts to still be present and hence works only if the error occurred quite early *and* the py:meth:`Datastore.verify` calls in :py:meth:`~ArtifactTransaction.revert_phase_two` still succeed.
+More frequently we expect failures in removal that occur after the transaction is opened to result in the transaction being left open and resolution left to the user.
+
+Calling :py:meth:`Butler.commit_transaction` to try again after a failure should always be viable for a removal transaction.
+The "abandon" implementation for removals is effectively identical to the one for for ``puts``: :py:meth:`Datastore.verify` is used to identify which datasets still exist and which have been removed, and the datastore records for those still presents are returned so they can be inserted into the database when the transaction is closed.
+The main difference is that the :py:class:`~lsst.daf.butler.DatasetRef` objects held by :py:class:`RemovalTransaction` include their original datastore records, allowing :py:meth:`Datastore.verify` to guard against changes (e.g. by comparing checksums), while in :py:class:`PutTransaction` all :py:meth:`Datastore.verify` can do is generate new records.
 
 .. _use-case-transferring-artifacts:
 
@@ -295,6 +338,12 @@ Transferring artifacts
 ----------------------
 
 TODO
+
+.. _concurrency-challenges:
+
+Concurrency Challenges
+======================
+
 
 .. _prototype-code:
 
@@ -314,6 +363,18 @@ Prototype Code
       :pyobject: PersistentLimitedButler
 
 .. py:class:: Butler
+
+   .. py:method:: put_many
+
+      .. literalinclude:: prototyping/butler.py
+         :language: py
+         :pyobject: Butler.put_many
+
+   .. py:method:: remove_datasets
+
+      .. literalinclude:: prototyping/butler.py
+         :language: py
+         :pyobject: Butler.remove_datasets
 
    .. py:method:: begin_transaction
 
@@ -523,6 +584,18 @@ Prototype Code
       .. literalinclude:: prototyping/artifact_transaction.py
          :language: py
          :pyobject: ArtifactTransaction.abandon_phase_two
+
+.. py:class:: PutTransaction
+
+   .. literalinclude:: prototyping/put_transaction.py
+      :language: py
+      :pyobject: PutTransaction
+
+.. py:class:: RemovalTransaction
+
+   .. literalinclude:: prototyping/removal_transaction.py
+      :language: py
+      :pyobject: RemovalTransaction
 
 
 

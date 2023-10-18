@@ -189,6 +189,13 @@ class Datastore(ABC):
         paths
             Mapping from possibly-relative URI to definitely-absolute,
             signed-if-needed URL.
+
+        Notes
+        -----
+        This method is not responsible for generating records; in this
+        prototype we delegate that to `verify` so we can always do that work on
+        the Butler REST server when there is one, since `put_many` can only be
+        called on the client.
         """
         raise NotImplementedError()
 

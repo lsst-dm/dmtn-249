@@ -85,7 +85,7 @@ class TransferTransaction(ArtifactTransaction):
         self,
         datastore: Datastore,
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        records, _, missing, corrupted = self._verify_artifacts(datastore, self.refs)
+        records, _, missing, corrupted = self.verify_artifacts(datastore, self.refs)
         if missing or corrupted:
             raise RuntimeError(
                 f"{len(missing)} dataset(s) have were not transferred and {len(corrupted)} had missing or "
@@ -122,7 +122,7 @@ class TransferTransaction(ArtifactTransaction):
         self,
         datastore: Datastore,
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        records, _, missing, corrupted = self._verify_artifacts(datastore, self.refs)
+        records, _, missing, corrupted = self.verify_artifacts(datastore, self.refs)
         for ref in missing:
             warnings.warn(f"{ref} was not transferred and will remain stored.")
         for ref in corrupted:

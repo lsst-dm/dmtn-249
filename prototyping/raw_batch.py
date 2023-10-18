@@ -50,9 +50,9 @@ class RawBatch(pydantic.BaseModel):
 
     dimension_insertions: list[DimensionDataInsertion] = pydantic.Field(default_factory=list)
 
-    dataset_insertions: dict[CollectionName, dict[DatasetTypeName, list[DatasetInsertion]]] = pydantic.Field(
-        default_factory=dict
-    )
+    dataset_registrations: dict[
+        CollectionName, dict[DatasetTypeName, list[DatasetRegistration]]
+    ] = pydantic.Field(default_factory=dict)
 
     collection_edits: list[
         # TODO: include CALIBRATION collection edits, too.
@@ -226,8 +226,15 @@ class DimensionDataInsertion(pydantic.BaseModel):
 
 
 @final
-class DatasetInsertion(pydantic.BaseModel):
-    """Serializable representation of a registry dataset insertion."""
+class DatasetRegistration(pydantic.BaseModel):
+    """Serializable representation of a registry dataset registration.
+
+    Registering a dataset means adding it to the ``dataset`` table and as well
+    as the ``dataset_tags_*`` table that associates it with its
+    `~CollectionType.RUN` collection.  It is necessary but not sufficient for
+    the dataset to be associated with datastore records or artifacts (outside
+    of an artifact transaction).
+    """
 
     # No dataset type or RUN because those are keys in a nested dict and this
     # is part of the value.
@@ -243,5 +250,5 @@ class DatasetInsertion(pydantic.BaseModel):
     """
 
     @classmethod
-    def from_ref(cls, ref: DatasetRef) -> DatasetInsertion:
+    def from_ref(cls, ref: DatasetRef) -> DatasetRegistration:
         return cls(uuid=ref.id, data_coordinate_values=ref.dataId.values_tuple())

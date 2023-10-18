@@ -279,7 +279,7 @@ class ArtifactTransaction(ABC):
         """
         raise NotImplementedError()
 
-    def _verify_artifacts(
+    def verify_artifacts(
         self,
         datastore: Datastore,
         refs: Mapping[DatasetId, DatasetRef],

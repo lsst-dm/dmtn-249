@@ -13,7 +13,7 @@ from lsst.resources import ResourcePath
 
 from .aliases import CollectionName, DatastoreTableName, StorageURI
 from .primitives import DatasetRef
-from .raw_batch import RawBatch, DatasetInsertion
+from .raw_batch import RawBatch, DatasetRegistration
 from .artifact_transaction import ArtifactTransaction
 
 if TYPE_CHECKING:
@@ -21,6 +21,10 @@ if TYPE_CHECKING:
 
 
 class PutTransaction(pydantic.BaseModel, ArtifactTransaction):
+    """An artifact transaction implementation that writes several in-memory
+    datasets to the repository.
+    """
+
     refs: dict[uuid.UUID, DatasetRef]
 
     @classmethod
@@ -46,8 +50,8 @@ class PutTransaction(pydantic.BaseModel, ArtifactTransaction):
         # artifacts if there's a constraint violation.
         batch = RawBatch()
         for ref in self.refs.values():
-            batch.dataset_insertions.setdefault(ref.run, {}).setdefault(ref.datasetType.name, []).append(
-                DatasetInsertion(uuid=ref.id, data_coordinate_values=ref.dataId.values_tuple())
+            batch.dataset_registrations.setdefault(ref.run, {}).setdefault(ref.datasetType.name, []).append(
+                DatasetRegistration(uuid=ref.id, data_coordinate_values=ref.dataId.values_tuple())
             )
         return batch
 
@@ -66,7 +70,7 @@ class PutTransaction(pydantic.BaseModel, ArtifactTransaction):
         self,
         datastore: Datastore,
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        records, _, missing, corrupted = self._verify_artifacts(datastore, self.refs)
+        records, _, missing, corrupted = self.verify_artifacts(datastore, self.refs)
         if missing or corrupted:
             raise RuntimeError(
                 f"{len(missing)} dataset(s) were not written and {len(corrupted)} had missing or "
@@ -85,7 +89,7 @@ class PutTransaction(pydantic.BaseModel, ArtifactTransaction):
         self,
         datastore: Datastore,
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        records, _, missing, corrupted = self._verify_artifacts(datastore, self.refs)
+        records, _, missing, corrupted = self.verify_artifacts(datastore, self.refs)
         for ref in missing:
             warnings.warn(f"{ref} was not written and will remain unstored.")
         for ref in corrupted:
