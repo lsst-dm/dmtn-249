@@ -2,20 +2,22 @@ from __future__ import annotations
 
 import dataclasses
 from abc import abstractmethod
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, overload, final
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
+from datetime import datetime, timedelta
+from typing import Any, ClassVar, final, overload
 
 from lsst.daf.butler import (
+    ButlerConfig,
     DataCoordinate,
     DataId,
     DataIdValue,
     DatasetId,
+    DatasetType,
+    DeferredDatasetHandle,
+    DimensionRecord,
     DimensionUniverse,
     StorageClass,
-    DatasetType,
     Timespan,
-    DimensionRecord,
-    DeferredDatasetHandle,
 )
 from lsst.daf.butler.registry import CollectionSummary
 from lsst.daf.butler.registry import RegistryDefaults as ButlerClientDefaults
@@ -23,8 +25,8 @@ from lsst.daf.butler.registry.interfaces import CollectionRecord
 from lsst.resources import ResourcePath, ResourcePathExpression
 
 from .aliases import (
-    CollectionPattern,
     CollectionName,
+    CollectionPattern,
     DatasetTypeName,
     DimensionElementName,
     GetParameter,
@@ -33,7 +35,8 @@ from .aliases import (
     StorageURI,
 )
 from .artifact_transaction import ArtifactTransaction, ArtifactTransactionName
-from .persistent_limited_butler import PersistentLimitedButler, PersistentLimitedButlerConfig
+from .datastore import Datastore
+from .limited_butler import LimitedButler
 from .primitives import DatasetRef
 
 
@@ -43,7 +46,52 @@ class UnfinishedTransactionError(RuntimeError):
     """
 
 
-class Butler(PersistentLimitedButler):
+class PathMapping(Mapping[StorageURI, ResourcePath]):
+    def __init__(
+        self,
+        uris: Set[StorageURI],
+    ):
+        self._uris = uris
+
+    def __iter__(self) -> Iterator[StorageURI]:
+        return iter(self._uris)
+
+    def __contains__(self, __key: object) -> bool:
+        return __key in self._uris
+
+    def __len__(self) -> int:
+        return len(self._uris)
+
+    def __getitem__(self, __key: StorageURI) -> ResourcePath:
+        root, relative = __key
+        if root is not None:
+            return root.join(relative)
+        else:
+            # TODO: I'm not sure forceAbsolute=True is appropriate - we require
+            # the result to be absolute, but we want it to raise if it isn't
+            # already, rather than assume the current directory is relevant.
+            return ResourcePath(relative, forceAbsolute=True)
+
+
+class SignedPathMapping(PathMapping):
+    def __init__(
+        self,
+        uris: Set[StorageURI],
+        sign: Callable[[Iterable[StorageURI]], tuple[dict[StorageURI, ResourcePath], datetime]],
+    ):
+        super().__init__(uris)
+        self._sign = sign
+        self._cache, self._expiration = sign(self._uris)
+
+    _PADDING: ClassVar[timedelta] = timedelta(seconds=5)
+
+    def __getitem__(self, __key: StorageURI) -> ResourcePath:
+        if self._expiration + self._PADDING < datetime.now():
+            self._cache, self._expiration = self._sign(self.keys())
+        return self._cache[__key]
+
+
+class Butler(LimitedButler):
     """Base class for full clients of butler data repositories."""
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Butler:
@@ -53,6 +101,7 @@ class Butler(PersistentLimitedButler):
         raise NotImplementedError()
 
     _cache: ButlerClientCache | None
+    _datastore: Datastore
     _defaults: ButlerClientDefaults
     _universe: DimensionUniverse
 
@@ -354,59 +403,6 @@ class Butler(PersistentLimitedButler):
                 ) from main_err
             raise
 
-    @final
-    def transfer_artifacts_from(
-        self,
-        origin: PersistentLimitedButler,
-        refs: Iterable[DatasetRef],
-        *,
-        mode: str,
-        transaction_name: ArtifactTransactionName | None = None,
-    ) -> None:
-        """Transfer dataset artifacts from another butler to this one.
-
-        Parameters
-        ----------
-        origin : `PersistentLimitedButler`
-            Butler to transfer from.
-        refs : `~collections.abc.Iterable` [ `DatasetRef` ]
-            Datasets whose artifacts should be transferred.
-        mode : `str`
-            Transfer mode.  Note that `None` is not supported, because directly
-            writing to a datastore-managed location without an open transaction
-            is now illegal.
-        transaction_name : `str`, optional
-            Name of the transaction.  If provided, concurrent calls with the
-            same transaction will pick a single winner with the result doing
-            nothing.  The caller is responsible for ensuring all such calls
-            would actually do the same thing.
-
-        Notes
-        -----
-        For simplicity this method assumes the given datasets already exist in
-        the destination database but are not stored there, so only their
-        artifacts and datastore records need to be transferred.  The extension
-        to more realistic cases just involves constructing a `RawBatch`
-        instance and passing it through the transaction object.
-        """
-        from .transfer_transaction import TransferTransaction
-
-        refs_dict = {ref.id: ref for ref in refs}
-        requests = origin._datastore.initiate_transfer_from(refs_dict.values(), mode)
-        responses = self._datastore.interpret_transfer_to(refs_dict.values(), requests, origin)
-        transaction = TransferTransaction(
-            responses=responses,
-            origin_root=origin._root,
-            origin_config=origin._config,
-            refs=refs_dict,
-        )
-        transaction_name, winner = self.begin_transaction(transaction)
-        if not winner:
-            # Another process already opened *exactly* this transaction; let
-            # them win by doing nothing.
-            return
-        self.commit_transaction(transaction_name)
-
     ###########################################################################
     #
     # Convenience interfaces that will delegate to query().
@@ -606,6 +602,17 @@ class Butler(PersistentLimitedButler):
         """
         raise NotImplementedError()
 
+    def _get_resource_paths(
+        self, uris: Iterable[StorageURI], write: bool = False
+    ) -> Mapping[StorageURI, ResourcePath]:
+        """Return `ResourcePath` objects usable for direct Datastore operations
+        for the given possibly-relative URIs.
+
+        This turns URIs into absolute URLs and will sign them if needed for
+        this repository.
+        """
+        return PathMapping(frozenset(uris))
+
 
 @dataclasses.dataclass
 class ButlerClientCache:
@@ -624,18 +631,3 @@ class ButlerClientCache:
     dataset_types: Mapping[DatasetTypeName, DatasetType]
     collections: Mapping[CollectionName, tuple[CollectionRecord, CollectionSummary]]
     dimension_records: Mapping[DimensionElementName, Mapping[tuple[DataIdValue, ...], DimensionRecord]]
-
-
-class ButlerConfig(PersistentLimitedButlerConfig):
-    """Configuration and factory for a `Butler`."""
-
-    @abstractmethod
-    def make_butler(self, root: ResourcePath | None) -> Butler:
-        """Construct a butler from this configuration and the given root.
-
-        The root is not stored with the configuration to encourage
-        relocatability, and hence must be provided on construction in addition
-        to the config.  The root is only optional if all nested datastores
-        know their own absolute root or do not require any paths.
-        """
-        raise NotImplementedError()

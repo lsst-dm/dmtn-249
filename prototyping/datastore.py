@@ -1,22 +1,17 @@
 from __future__ import annotations
 
-__all__ = ("Datastore", "DatastoreTableDefinition", "ArtifactTransferResponse", "DatastoreConfig")
+__all__ = ("Datastore", "DatastoreTableDefinition")
 
 import dataclasses
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
-from typing import Any, TypeAlias, TYPE_CHECKING, final
+from typing import Any, TypeAlias, final
 
+from lsst.daf.butler import DatasetId, StoredDatastoreItemInfo, ddl
 from lsst.resources import ResourcePath
 
-from lsst.daf.butler import StoredDatastoreItemInfo, ddl, DatasetId
-from .extension_config import ExtensionConfig
-from .aliases import GetParameter, InMemoryDataset, DatastoreTableName, StorageURI
-from .artifact_transfer_request import ArtifactTransferRequest
+from .aliases import DatastoreTableName, GetParameter, InMemoryDataset, StorageURI
 from .primitives import DatasetRef
-
-if TYPE_CHECKING:
-    from .persistent_limited_butler import PersistentLimitedButler
 
 
 class Datastore(ABC):
@@ -84,98 +79,6 @@ class Datastore(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def initiate_transfer_from(
-        self, refs: Iterable[DatasetRef], transfer_mode: str
-    ) -> Iterable[ArtifactTransferRequest]:
-        """Map the given datasets into artifact transfer requests that could
-        be used to transfer those datasets to another datastore.
-
-        Each transfer request object should represent an integral number of
-        datasets and correspond to how the artifacts would ideally be
-        transferred to another datastore of the same type.  There is no
-        guarantee that the receiving datastore will keep the same artifacts.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def interpret_transfer_to(
-        self,
-        refs: Iterable[DatasetRef],
-        requests: Iterable[ArtifactTransferRequest],
-        origin: PersistentLimitedButler,
-    ) -> list[ArtifactTransferResponse]:
-        """Create a manifest that records how this datastore would receive the
-        given artifacts from another datastore.
-
-        This does not actually perform any artifact writes.
-
-        Parameters
-        ----------
-        refs : `~collections.abc.Iterable` [ `DatasetRef` ]
-            Datasets to be received.
-        requests : `~collections.abc.Iterable` [ `ArtifactTransferRequest` ]
-            Artifacts according to the origin datastore.  Minimal-effort
-            transfers - like file copies - preserve artifacts, but in the
-            general case transfers only need to preserve datasets.
-        origin : `PersistentLimitedButler`
-            Butler that owns or at least knows how to read the datasets
-            being transferred.
-
-        Returns
-        -------
-        response
-            Description of the artifacts to be transferred as interpreted by
-            this datastore.  Embedded destination records may include signed
-            URIs.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def execute_transfer_to(
-        self,
-        responses: list[ArtifactTransferResponse],
-        destination_paths: Mapping[StorageURI, ResourcePath],
-        origin: PersistentLimitedButler,
-    ) -> None:
-        """Actually execute transfers to this datastore.
-
-        Parameters
-        ----------
-        responses : `list` [ `ArtifactTransferResponses` ]
-            Responses returned by `interpret_transfer_to`.
-        destination_paths
-            Mapping from possibly-relative URI to definitely-absolute,
-            signed-if-needed URL.
-        origin
-            Butler being transferred from.  May be used to `~LimitedButler.get`
-            datasets to `~LimitedButler.put` them again, or to obtained signed
-            origin `ResourcePath` objects in order to perform artifact
-            transfers.
-        """
-        raise NotImplementedError()
-
-    def serialize_transfer_to(self, responses: list[ArtifactTransferResponse]) -> Any:
-        """Serialize a list of transfer responses created by this datastore
-        to JSON-friendly data.
-
-        If all response instances are pydantic models or are otherwise
-        recognized by pydantic, the ``responses`` list may returned as-is. This
-        is assumed to be the case by the base class implementation.
-        """
-        return responses
-
-    @abstractmethod
-    def deserialize_transfer_to(self, data: Any) -> list[ArtifactTransferRequest]:
-        """Deserialize a list of transfer responses created and then serialized
-        by this datastore from JSON-friendly data.
-
-        If all expected response types are pydantic models or are otherwise
-        recognized by pydantic, this just needs to invoke
-        `pydantic.TypeAdapter.validate_python` or similar using the right type.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
     def put_many(
         self, arg: Iterable[tuple[InMemoryDataset, DatasetRef]], /, paths: Mapping[StorageURI, ResourcePath]
     ) -> None:
@@ -204,7 +107,7 @@ class Datastore(ABC):
         self, refs: Iterable[DatasetRef]
     ) -> Iterable[tuple[DatasetId, bool | None, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]]:
         """Test whether all artifacts are present for a dataset and return
-        records that represent them.
+        datastore records that represent them.
 
         Parameters
         ----------
@@ -266,18 +169,3 @@ An `ArtifactTransferResponse` generally combines one or more
 `ArtifactTransferResponse` instances with a datastore-specific representation
 of how they will appear in the datastore.
 """
-
-
-class DatastoreConfig(ExtensionConfig):
-    """Configuration and factory for a `Datastore`."""
-
-    @abstractmethod
-    def make_datastore(self, root: ResourcePath | None) -> Datastore:
-        """Construct a datastore from this configuration and the given root.
-
-        The root is not stored with the configuration to encourage
-        relocatability, and hence must be provided on construction in addition
-        to the config.  The root is only optional if all nested datastores
-        know their own absolute root or do not require any paths.
-        """
-        raise NotImplementedError()

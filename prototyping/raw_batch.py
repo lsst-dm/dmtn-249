@@ -5,13 +5,7 @@ import uuid
 from typing import Any, final
 
 import pydantic
-from lsst.daf.butler import (
-    CollectionType,
-    DataIdValue,
-    DimensionRecord,
-    DimensionUniverse,
-    DimensionGraph,
-)
+from lsst.daf.butler import CollectionType, DataIdValue, DimensionGraph, DimensionRecord, DimensionUniverse
 
 from .aliases import (
     CollectionDocumentation,

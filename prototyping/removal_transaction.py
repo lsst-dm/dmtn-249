@@ -4,17 +4,17 @@ __all__ = ("RemovalTransaction",)
 
 import uuid
 import warnings
-from collections.abc import Mapping, Set
-from typing import TYPE_CHECKING, Self, Any
+from collections.abc import Set
+from typing import TYPE_CHECKING, Any, Self
 
 import pydantic
 from lsst.daf.butler import StoredDatastoreItemInfo
 from lsst.resources import ResourcePath
 
-from .aliases import CollectionName, DatastoreTableName, StorageURI
+from .aliases import CollectionName, DatastoreTableName
+from .artifact_transaction import ArtifactTransaction
 from .primitives import DatasetRef
 from .raw_batch import RawBatch
-from .artifact_transaction import ArtifactTransaction
 
 if TYPE_CHECKING:
     from .datastore import Datastore
@@ -44,21 +44,8 @@ class RemovalTransaction(pydantic.BaseModel, ArtifactTransaction):
     def get_unstores(self) -> Set[uuid.UUID]:
         return self.refs.keys()
 
-    def get_uris(self, datastore: Datastore) -> list[StorageURI]:
-        return datastore.extract_existing_uris(self.refs.values())
-
-    def commit_phase_one(
-        self,
-        datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
-    ) -> None:
-        # Can't do anything on client, since we can't delete through signed
-        # URLs.
-        pass
-
-    def commit_phase_two(
-        self,
-        datastore: Datastore,
+    def commit(
+        self, datastore: Datastore
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         datastore.unstore(self.refs.values())
         batch = RawBatch()
@@ -66,19 +53,8 @@ class RemovalTransaction(pydantic.BaseModel, ArtifactTransaction):
             batch.dataset_removals.update(self.refs.keys())
         return batch, {}
 
-    def abandon_phase_one(
-        self,
-        datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
-    ) -> None:
-        # When abandoning a removal, all we're doing is verifying that
-        # artifacts still exist, and we always do verification on the server,
-        # so there's nothing to do on the client.
-        pass
-
-    def abandon_phase_two(
-        self,
-        datastore: Datastore,
+    def abandon(
+        self, datastore: Datastore
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         records, present, _, corrupted = self.verify_artifacts(datastore, self.refs)
         for ref in present:
@@ -88,19 +64,8 @@ class RemovalTransaction(pydantic.BaseModel, ArtifactTransaction):
         datastore.unstore(corrupted)
         return RawBatch(), records
 
-    def revert_phase_one(
-        self,
-        datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
-    ) -> None:
-        # When reverting a removal, all we're doing is verifying that
-        # artifacts still exist, and we always do verification on the server,
-        # so there's nothing to do on the client.
-        pass
-
-    def revert_phase_two(
-        self,
-        datastore: Datastore,
+    def revert(
+        self, datastore: Datastore
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         records, _, missing, corrupted = self.verify_artifacts(datastore, self.refs)
         if missing or corrupted:

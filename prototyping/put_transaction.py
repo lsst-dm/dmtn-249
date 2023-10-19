@@ -4,17 +4,17 @@ __all__ = ("PutTransaction",)
 
 import uuid
 import warnings
-from collections.abc import Mapping, Set
-from typing import TYPE_CHECKING, Self, Any
+from collections.abc import Set
+from typing import TYPE_CHECKING, Any, Self
 
 import pydantic
 from lsst.daf.butler import StoredDatastoreItemInfo
 from lsst.resources import ResourcePath
 
-from .aliases import CollectionName, DatastoreTableName, StorageURI
-from .primitives import DatasetRef
-from .raw_batch import RawBatch, DatasetRegistration
+from .aliases import CollectionName, DatastoreTableName
 from .artifact_transaction import ArtifactTransaction
+from .primitives import DatasetRef
+from .raw_batch import DatasetRegistration, RawBatch
 
 if TYPE_CHECKING:
     from .datastore import Datastore
@@ -42,9 +42,6 @@ class PutTransaction(pydantic.BaseModel, ArtifactTransaction):
     def get_runs(self) -> Set[CollectionName]:
         return frozenset(ref.run for ref in self.refs.values())
 
-    def get_uris(self, datastore: Datastore) -> list[StorageURI]:
-        return datastore.predict_new_uris(self.refs.values())
-
     def get_initial_batch(self) -> RawBatch:
         # We attempt to register all datasets up front, to avoid writing
         # artifacts if there's a constraint violation.
@@ -55,20 +52,8 @@ class PutTransaction(pydantic.BaseModel, ArtifactTransaction):
             )
         return batch
 
-    def commit_phase_one(
-        self,
-        datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
-    ) -> None:
-        # Can't do anything on client inside the transaction object because it
-        # doesn't have access to the in-memory object(s); we rely on other code
-        # calling datastore.put_many after the transaction is opened and before
-        # it is committed.
-        pass
-
-    def commit_phase_two(
-        self,
-        datastore: Datastore,
+    def commit(
+        self, datastore: Datastore
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         records, _, missing, corrupted = self.verify_artifacts(datastore, self.refs)
         if missing or corrupted:
@@ -78,16 +63,8 @@ class PutTransaction(pydantic.BaseModel, ArtifactTransaction):
             )
         return RawBatch(), records
 
-    def abandon_phase_one(
-        self,
-        datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
-    ) -> None:
-        pass
-
-    def abandon_phase_two(
-        self,
-        datastore: Datastore,
+    def abandon(
+        self, datastore: Datastore
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         records, _, missing, corrupted = self.verify_artifacts(datastore, self.refs)
         for ref in missing:
@@ -97,18 +74,8 @@ class PutTransaction(pydantic.BaseModel, ArtifactTransaction):
         datastore.unstore(corrupted)
         return RawBatch(), records
 
-    def revert_phase_one(
-        self,
-        datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
-    ) -> None:
-        # Can't do anything on client, since we can't delete through signed
-        # URLs.
-        pass
-
-    def revert_phase_two(
-        self,
-        datastore: Datastore,
+    def revert(
+        self, datastore: Datastore
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         datastore.unstore(self.refs.values())
         batch = RawBatch()

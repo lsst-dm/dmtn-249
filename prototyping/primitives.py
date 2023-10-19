@@ -8,11 +8,7 @@ import dataclasses
 import uuid
 from typing import final
 
-from lsst.daf.butler import (
-    DataCoordinate,
-    DatasetType,
-)
-from lsst.daf.butler import StoredDatastoreItemInfo
+from lsst.daf.butler import DataCoordinate, DatasetType, StoredDatastoreItemInfo
 
 from .aliases import CollectionName, DatastoreTableName
 

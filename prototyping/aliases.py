@@ -23,10 +23,10 @@ __all__ = (
     "DatastoreTableName",
     "StorageClassName",
     "StorageURI",
-    "TransferMode",
 )
 
 from typing import Any, TypeAlias
+
 from lsst.resources import ResourcePath
 
 CollectionDocumentation: TypeAlias = str
@@ -46,4 +46,3 @@ DatastoreRoot: TypeAlias = ResourcePath
 StorageURI: TypeAlias = tuple[
     DatastoreRoot | None, PossiblyRelativePath
 ]  # Datastore name, possibly-relative URI
-TransferMode: TypeAlias = str

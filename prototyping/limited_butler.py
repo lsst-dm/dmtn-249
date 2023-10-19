@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from lsst.daf.butler import DimensionUniverse, DeferredDatasetHandle
+from lsst.daf.butler import DeferredDatasetHandle, DimensionUniverse
 
 from .aliases import GetParameter, InMemoryDataset, StorageURI
 from .primitives import DatasetRef

@@ -1,4 +1,4 @@
-:tocdepth: 1
+:tocdepth: 2
 
 .. sectnum::
 
@@ -104,17 +104,6 @@ External workspaces can be used with any :py:class:`Butler`.
 Workspaces are expected to have lifetimes of days or perhaps weeks, and cease to exist when their outputs are committed to a data repository.
 Workspaces that use something other than a persisted :py:class:`~lsst.pipe.base.QuantumGraph` for dataset metadata will be supported, but no other concrete workspace implementations are currently planned.
 
-The inheritance relationships for different kinds of butlers is shown in :ref:`fig-butler-inheritance`.
-A workspace is associated with a :py:class:`PersistentLimitedButler` implementation, while data repositories must have full :py:class:`Butler` clients.
-Direct subclasses :py:class:`LimitedButler` are expected to be useful primarily as a way to add in-memory behaviors (caching, statistics-gathering) while proxying a persistent butler implementation of some kind.
-
-.. figure:: /_static/butler-inheritance.svg
-   :name: fig-butler-inheritance
-   :target: _images/butler-inheritance.svg
-   :alt: Butler inheritance relationships
-
-   Butler inheritance relationships
-
 .. _consistency-model:
 
 Consistency Model
@@ -201,22 +190,21 @@ Committing, reverting, or abandoning a transaction
 """"""""""""""""""""""""""""""""""""""""""""""""""
 
 A transaction can only be closed by calling :py:meth:`Butler.commit_transaction`, :py:meth:`~Butler.revert_transaction`, or :py:meth:`~Butler.abandon_transaction`.
-The commit operation attempts to accomplish the original goals of the transaction, raising (and keeping the transaction open) if it cannot fully succeed after doing as much as it can.
-Reverting is the opposite - the transaction attempts to undo any changes made by the transaction so far (including any made when opening it), and raises if this is impossible.
-Abandoning a transaction does the minimum amount of work to make the database and artifact storage consistent so that the transaction can be closed, and only raises if low-level database or artifact storage operations fail.
 
-These operations are delegated to :py:class:`ArtifactTransaction` methods with the same signatures and can perform the same kinds of low-level operations.
-Throughout the rest of this section we will refer only to "commit" methods, with the understanding that everything applies to the other operations as well.
+:py:meth:`Butler.commit_transaction` delegates to `ArtifactTransaction.commit`, and it always attempts to accomplish the original goals of the transaction.  It raises (keeping the transaction open) if it cannot fully succeed after doing as much as it can.
 
-:py:meth:`Butler.commit_transaction` delegates first to :py:meth:`ArtifactTransaction.commit_phase_one` and then to :py:meth:`ArtifactTransaction.commit_phase_two` to do the real work.
-The implementation is split across two methods specifically for ``RemoteButler``; it allows
+:py:meth:`Butler.revert_transaction` (delegating to :py:meth:`ArtifactTransaction.revert`) is the opposite - it attempts to undo any changes made by the transaction so far (including any made when opening it), and it also raises if this is impossible.
 
-- :py:meth:`~ArtifactTransaction.commit_phase_one` to be run in the client, which may be the only location where user files to be uploaded can be seen;
+:py:meth:`Butler.abandon_transaction` (delegating to :py:meth:`ArtifactTransaction.abandon`) does the minimum amount of work to make the database and artifact storage consistent, so that the transaction can be closed, and it should only raise if low-level database or artifact storage operations fail.
+This usually means accepting the artifact state as-is and only modifying the database.
 
-- :py:meth:`~ArtifactTransaction.commit_phase_two` to be run on the server, which is the only place deletions can occur and consistency guarantees can be safely verified.
+In ``RemoteButler`` the :py:class:`ArtifactTransaction` methods are always always run on the server, since this is the only place consistency guarantees can be safely verified.
+:py:class:`ArtifactTransaction` methods are not given the means to modify the repository database directly - instead, :py:meth:`Butler.commit_transaction` (etc.) is responsible for performing the database operations specified by the return value of :py:meth:`ArtifactTransaction.commit` (etc.):
 
-Neither method is given the means to modify the repository database directly - instead, :py:meth:`Butler.commit_transaction` is responsible for performing the database operations specified by the return values of :py:meth:`~ArtifactTransaction.commit_phase_two`.
-This happens in the same database transaction as the deletions from the ``artifact_transaction`` and ``artifact_transaction_run`` tables that close the artifact transaction.
+ - a :py:class:`RawBatch` instance, which can represent a wide variety of database-only insertions and deletions;
+ - a nested mapping of datastore records, which the transaction implementation guarantees to be consistent with the set of dataset artifacts present.
+
+These operations happen in the same database transaction as the deletions from the ``artifact_transaction`` and ``artifact_transaction_run`` tables that close the artifact transaction.
 
 .. _workspace-transactions:
 
@@ -289,23 +277,25 @@ The :py:meth:`~ArtifactTransaction.get_initial_batch` implementation for this tr
 This registration will be performed in the same database transaction that registers the artifact transaction, causing it to fail early and prevent the transaction from ever being opened if this violates a constraint, such as an invalid data ID value or a ``{dataset type, data ID, collection}`` uniqueness failure.
 If the artifact transaction is opened successfully, the new datasets will be present in the database without datastore records and hence (to queries that do not look specifically at this transaction) appear to be unstored for the duration of the transaction.
 
-After the transaction has been opened, :py:class:`Butler.put_many` calls :py:meth:`Datastore.predict_new_uris` and ``Butler._get_resource_paths`` to obtain all signed URLs needed for the writes.
-In ``DirectButler``, ``_get_resource_paths`` just concatenates the datastore root with the relative path instead.
+After the transaction has been opened, :py:class:`Butler.put_many` calls :py:meth:`Datastore.predict_new_uris` and :py:meth:`Butler._get_resource_paths` to obtain all signed URLs needed for the writes.
+In ``DirectButler``, :py:meth:`~Butler._get_resource_paths` just concatenates the datastore root with the relative path instead.
 These URLs are passed to :py:meth:`Datastore.put_many` to write the actual artifacts directly to their permanent locations.
 If these datastore operations succeed, :py:meth:`Butler.commit_transaction` is called.
-This calls the transaction's :py:meth:`~ArtifactTransaction.commit_phase_one` (always in the client) and :py:meth:`~ArtifactTransaction.commit_phase_two` (on the server for ``RemoteButler``, in the client in ``DirectButler``) methods.
-The first does nothing in this case, while the latter calls uses :py:class:`Datastore.verify` on all datasets in the transaction.
+This calls the transaction's :py:meth:`~ArtifactTransaction.commit` (on the server for ``RemoteButler``, in the client in ``DirectButler``) method, which calls :py:class:`Datastore.verify` on all datasets in the transaction.
 Because these :py:class:`~lsst.daf.butler.DatasetRef` objects do not have datastore records attached, :py:class:`Datastore.verify` is responsible for generating them (e.g. computing checksums and sizes) as well as checking that these artifacts all exist.
 The datastore records are returned to :py:meth:`Butler.commit_transaction`, which inserts them into the database as it closes the transaction.
+The :py:meth:`~ArtifactTransaction.commit` implementation returns an empty :py:class:`RawBatch`, since the datasets were registered when the transaction was opened.
 
 All operations after the transaction's opening occur in a ``try`` block that calls :py:class:`Butler.revert_transaction` if an exception is raised.
-The :py:meth:`~ArtifactTransaction.revert_phase_one` implementation for :py:class:`PutTransaction` again does nothing, while :py:meth:`~ArtifactTransaction.revert_phase_two` calls :py:meth:`Datastore.unstore` to remove any artifacts that may have been written.
+The :py:meth:`~ArtifactTransaction.revert` implementation calls :py:meth:`Datastore.unstore` to remove any artifacts that may have been written.
 If this succeeds, it provides strong exception safety; the repository is left in the same condition it was before the transaction was opened.
 If it fails - as would occur if the database or server became unavailable or artifact storage became unwriteable - a special exception is raised (chained to the original error) notifying the user that the transaction has been left open and must be cleaned up manually.
 
 In the case of :py:class:`PutTransaction`, a revert should always be possible as long as the database and artifact storage systems are working normally.
-As required, an abandon implementation is also provided.
-This does nothing in :py:meth:`~ArtifactTransaction.abandon_phase_one` and verifies datasets in :py:meth:`~ArtifactTransaction.abandon_phase_two` to insert datastore records for only those datasets whose artifacts had already been written.
+
+As always, abandoning the failed transaction is another option.
+The :py:meth:`~ArtifactTransaction.abandon` implementation for ``put`` is quite similar to the :py:meth:`~ArtifactTransaction.commit` implementation; it differs only in that it exits without error instead of raising an exception when some artifacts are missing.
+It still inserts datastore records only for the datasets whose artifacts are already present (as is necessary for consistency guarantees).
 
 .. _use-case-removing-artifacts:
 
@@ -318,18 +308,17 @@ These are used to construct and begin a :py:class:`RemovalTransaction`.
 The serialized form of this transaction is again a mapping of :py:class:`~lsst.daf.butler.DatasetRef` objects, along with the boolean ``purge`` flag.
 
 The :py:class:`RemovalTransaction` :py:class:`~ArtifactTransaction.get_unstores` implementation returns the UUIDs of all datasets to be removed, which causes all datastore records for those datasets to be removed in the same database transaction that begins the artifact transaction.
-Its  :py:class:`~ArtifactTransaction.get_initial_batch` does not specify that datasets are to be unregistered at this time, however, even if ``purge=True``.
+Its :py:class:`~ArtifactTransaction.get_initial_batch` does not specify that datasets are to be unregistered at this time, however, even if ``purge=True``.
 Mirroring :py:class:`PutTransaction`, we want the datasets managed by the artifact transaction to appear as registered but unstored while the artifact transaction is open.
 
 In this case there is nothing to do with the transaction after it has been opened besides commit it.
-The :py:meth:`~ArtifactTransaction.commit_phase_one` implementation does nothing, since we cannot delete artifacts through signed URLs and hence cannot in general perform deletions on the client (in fact, all "phase one" methods on this transaction do nothing, because we do not call :py:meth:`Datastore.verify` on the client, either).
-The :py:meth:`~ArtifactTransaction.commit_phase_two` implementation delegates to :py:meth:`Datastore.unstore` to actually remove all artifacts, and the batch of database operations it returns includes de-registration of the datasets if and only if ``purge=True``, so that the datasets are fully deleted from the database when the transaction is closed.
+The :py:meth:`~ArtifactTransaction.commit` implementation delegates to :py:meth:`Datastore.unstore` to actually remove all artifacts, and the batch of database operations it returns includes de-registration of the datasets if and only if ``purge=True``, so that the datasets are fully deleted from the database when the transaction is closed.
 
-If the commit operation fails, a revert is attempted in order to try to provide strong exception safety, but this will frequently fail, since it requires all artifacts to still be present and hence works only if the error occurred quite early *and* the py:meth:`Datastore.verify` calls in :py:meth:`~ArtifactTransaction.revert_phase_two` still succeed.
-More frequently we expect failures in removal that occur after the transaction is opened to result in the transaction being left open and resolution left to the user.
+If the commit operation fails, a revert is attempted in order to try to provide strong exception safety, but this will frequently fail, since it requires all artifacts to still be present and hence works only if the error occurred quite early *and* the py:meth:`Datastore.verify` calls in :py:meth:`~ArtifactTransaction.revert` still succeed.
+More frequently we expect failures in removal that occur after the transaction is opened to result in the transaction being left open and resolution left to the user, again with a special exception raised to indicate this state.
 
-Calling :py:meth:`Butler.commit_transaction` to try again after a failure should always be viable for a removal transaction.
-The "abandon" implementation for removals is effectively identical to the one for for ``puts``: :py:meth:`Datastore.verify` is used to identify which datasets still exist and which have been removed, and the datastore records for those still presents are returned so they can be inserted into the database when the transaction is closed.
+Calling :py:meth:`Butler.commit_transaction` to try again after a failure should always be viable for a removal transaction, since we can always try again to delete artifacts.
+The "abandon" implementation for removals is effectively identical to the one for ``put``: :py:meth:`Datastore.verify` is used to identify which datasets still exist and which have been removed, and the datastore records for those still present are returned so they can be inserted into the database when the transaction is closed.
 The main difference is that the :py:class:`~lsst.daf.butler.DatasetRef` objects held by :py:class:`RemovalTransaction` include their original datastore records, allowing :py:meth:`Datastore.verify` to guard against changes (e.g. by comparing checksums), while in :py:class:`PutTransaction` all :py:meth:`Datastore.verify` can do is generate new records.
 
 .. _use-case-transferring-artifacts:
@@ -355,12 +344,6 @@ Prototype Code
    .. literalinclude:: prototyping/limited_butler.py
       :language: py
       :pyobject: LimitedButler
-
-.. py:class:: PersistentLimitedButler
-
-   .. literalinclude:: prototyping/persistent_limited_butler.py
-      :language: py
-      :pyobject: PersistentLimitedButler
 
 .. py:class:: Butler
 
@@ -418,6 +401,12 @@ Prototype Code
          :language: py
          :pyobject: Butler.vacuum_workspaces
 
+   .. py:method:: _get_resource_paths
+
+      .. literalinclude::  prototyping/butler.py
+         :language: py
+         :pyobject: Butler._get_resource_paths
+
 .. py:class:: Datastore
 
    .. py:attribute:: tables
@@ -443,37 +432,6 @@ Prototype Code
       .. literalinclude:: prototyping/datastore.py
          :language: py
          :pyobject: Datastore.get_many
-
-   .. py:method:: initiate_transfer_from
-
-      .. literalinclude:: prototyping/datastore.py
-         :language: py
-         :pyobject: Datastore.initiate_transfer_from
-
-   .. py:method:: interpret_transfer_to
-
-      .. literalinclude:: prototyping/datastore.py
-         :language: py
-         :pyobject: Datastore.interpret_transfer_to
-
-   .. py:method:: execute_transfer_to
-
-      .. literalinclude:: prototyping/datastore.py
-         :language: py
-         :pyobject: Datastore.execute_transfer_to
-
-   .. py:method:: serialize_transfer_to
-
-      .. literalinclude:: prototyping/datastore.py
-         :language: py
-         :pyobject: Datastore.serialize_transfer_to
-
-
-   .. py:method:: deserialize_transfer_to
-
-      .. literalinclude:: prototyping/datastore.py
-         :language: py
-         :pyobject: Datastore.deserialize_transfer_to
 
    .. py:method:: put_many
 
@@ -543,47 +501,23 @@ Prototype Code
          :language: py
          :pyobject: ArtifactTransaction.get_unstores
 
-   .. py:method:: get_uris
+   .. py:method:: commit
 
       .. literalinclude:: prototyping/artifact_transaction.py
          :language: py
-         :pyobject: ArtifactTransaction.get_uris
+         :pyobject: ArtifactTransaction.commit
 
-   .. py:method:: commit_phase_one
-
-      .. literalinclude:: prototyping/artifact_transaction.py
-         :language: py
-         :pyobject: ArtifactTransaction.commit_phase_one
-
-   .. py:method:: commit_phase_two
+   .. py:method:: revert
 
       .. literalinclude:: prototyping/artifact_transaction.py
          :language: py
-         :pyobject: ArtifactTransaction.commit_phase_two
+         :pyobject: ArtifactTransaction.revert
 
-   .. py:method:: revert_phase_one
-
-      .. literalinclude:: prototyping/artifact_transaction.py
-         :language: py
-         :pyobject: ArtifactTransaction.revert_phase_one
-
-   .. py:method:: revert_phase_two
+   .. py:method:: abandon
 
       .. literalinclude:: prototyping/artifact_transaction.py
          :language: py
-         :pyobject: ArtifactTransaction.revert_phase_two
-
-   .. py:method:: abandon_phase_one
-
-      .. literalinclude:: prototyping/artifact_transaction.py
-         :language: py
-         :pyobject: ArtifactTransaction.abandon_phase_one
-
-   .. py:method:: abandon_phase_two
-
-      .. literalinclude:: prototyping/artifact_transaction.py
-         :language: py
-         :pyobject: ArtifactTransaction.abandon_phase_two
+         :pyobject: ArtifactTransaction.abandon
 
 .. py:class:: PutTransaction
 
@@ -597,6 +531,11 @@ Prototype Code
       :language: py
       :pyobject: RemovalTransaction
 
+.. py:class:: RawBatch
+
+   .. literalinclude:: prototyping/raw_batch.py
+      :language: py
+      :pyobject: RawBatch
 
 
 .. rubric:: References

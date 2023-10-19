@@ -4,20 +4,18 @@ __all__ = ("ArtifactTransaction", "ArtifactTransactionHeader", "ArtifactTransact
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Set
-from typing import Any, Self, final, TypeAlias
+from typing import Any, Self, TypeAlias, final
 
 import pydantic
-
 from lsst.daf.butler import DatasetId, StoredDatastoreItemInfo
 from lsst.resources import ResourcePath
 from lsst.utils.doImport import doImportType
 from lsst.utils.introspection import get_full_type_name
 
-from .aliases import CollectionName, DatastoreTableName, StorageURI
+from .aliases import CollectionName, DatastoreTableName
 from .datastore import Datastore
-from .raw_batch import RawBatch
 from .primitives import DatasetRef
-
+from .raw_batch import RawBatch
 
 ArtifactTransactionName: TypeAlias = str
 """Alias for the name a transaction is registered with in the repository
@@ -28,12 +26,6 @@ database.
 class ArtifactTransaction(ABC):
     """An abstraction for operations that modify both butler database and
     datastore state.
-
-    `ArtifactTransaction` instances are registered with the database and saved
-    to either the database or a `ResourcePath` JSON location by calling
-    `Butler.begin_transaction`, and persist until committed or abandoned.
-    After a transaction has begun it should only be manipulated by the
-    `Butler.commit` and `Butler.abandon` methods.
     """
 
     @classmethod
@@ -131,39 +123,8 @@ class ArtifactTransaction(ABC):
         return frozenset()
 
     @abstractmethod
-    def get_uris(self, datastore: Datastore) -> list[StorageURI]:
-        """Return possibly-relative URIs that need to be turned into
-        possibly-signed and definitely absolute URLs to pass to commit and
-        abandon methods.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def commit_phase_one(
-        self,
-        datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
-    ) -> None:
-        """Begin to commit this transaction.
-
-        This method will always be called by the client.
-
-        Parameters
-        ----------
-        datastore : `Datastore`
-            Datastore client for this data repository.
-        paths : `~collections.abc.Mapping` [ `str`, \
-                `~lsst.resources.ResourcePath` ]
-            Mapping from unsigned possibly-relative URI to absolute
-            possibly-signed URL.  Keys are the same as those returned by
-            `get_uris` for the resolution.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def commit_phase_two(
-        self,
-        datastore: Datastore,
+    def commit(
+        self, datastore: Datastore
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         """Finish committing this transaction.
 
@@ -186,31 +147,8 @@ class ArtifactTransaction(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def revert_phase_one(
-        self,
-        datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
-    ) -> None:
-        """Begin to revert this transaction.
-
-        This method will always be called by the client.
-
-        Parameters
-        ----------
-        datastore : `Datastore`
-            Datastore client for this data repository.
-        paths : `~collections.abc.Mapping` [ `str`, \
-                `~lsst.resources.ResourcePath` ]
-            Mapping from unsigned possibly-relative URI to absolute
-            possibly-signed URL.  Keys are the same as those returned by
-            `get_uris` for the resolution.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def revert_phase_two(
-        self,
-        datastore: Datastore,
+    def revert(
+        self, datastore: Datastore
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         """Finish reverting this transaction.
 
@@ -233,31 +171,8 @@ class ArtifactTransaction(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def abandon_phase_one(
-        self,
-        datastore: Datastore,
-        paths: Mapping[StorageURI, ResourcePath],
-    ) -> None:
-        """Begin to abandon this transaction.
-
-        This method will always be called by the client.
-
-        Parameters
-        ----------
-        datastore : `Datastore`
-            Datastore client for this data repository.
-        paths : `~collections.abc.Mapping` [ `str`, \
-                `~lsst.resources.ResourcePath` ]
-            Mapping from unsigned possibly-relative URI to absolute
-            possibly-signed URL.  Keys are the same as those returned by
-            `get_uris` for the resolution.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def abandon_phase_two(
-        self,
-        datastore: Datastore,
+    def abandon(
+        self, datastore: Datastore
     ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
         """Finish abandoning this transaction.
 
@@ -280,9 +195,7 @@ class ArtifactTransaction(ABC):
         raise NotImplementedError()
 
     def verify_artifacts(
-        self,
-        datastore: Datastore,
-        refs: Mapping[DatasetId, DatasetRef],
+        self, datastore: Datastore, refs: Mapping[DatasetId, DatasetRef]
     ) -> tuple[
         dict[DatastoreTableName, list[StoredDatastoreItemInfo]],
         list[DatasetRef],
@@ -291,9 +204,8 @@ class ArtifactTransaction(ABC):
     ]:
         """Verify dataset refs using a datastore and classify them.
 
-        This is a convenience method typically called by at least two of a
-        transaction's (`commit_phase_two`, `revert_phase_two`,
-        `abandon_phase_two`).
+        This is a convenience method typically called by at least two of
+        {`commit`, `revert`, `abandon`}.
 
         Parameters
         ----------
