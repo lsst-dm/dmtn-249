@@ -1,21 +1,24 @@
 from __future__ import annotations
 
-__all__ = ("ArtifactTransaction", "ArtifactTransactionHeader", "ArtifactTransactionName")
+__all__ = (
+    "ArtifactTransaction",
+    "ArtifactTransactionName",
+    "ArtifactTransactionOpenContext",
+    "ArtifactTransactionRevertContext",
+    "ArtifactTransactionCloseContext",
+    "ArtifactTransactionCommitContext",
+)
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Set
-from typing import Any, Self, TypeAlias, final
+from collections.abc import Iterable, Mapping, Sequence, Set
+from typing import Any, TypeAlias
 
 import pydantic
-from lsst.daf.butler import DatasetId, StoredDatastoreItemInfo
-from lsst.resources import ResourcePath
-from lsst.utils.doImport import doImportType
-from lsst.utils.introspection import get_full_type_name
+from lsst.daf.butler import CollectionType, DatasetId, StoredDatastoreItemInfo, Timespan
 
-from .aliases import CollectionName, DatastoreTableName
+from .aliases import CollectionDocumentation, CollectionName, DatastoreTableName
 from .datastore import Datastore
 from .primitives import DatasetRef
-from .raw_batch import RawBatch
 
 ArtifactTransactionName: TypeAlias = str
 """Alias for the name a transaction is registered with in the repository
@@ -23,53 +26,10 @@ database.
 """
 
 
-class ArtifactTransaction(ABC):
+class ArtifactTransaction(pydantic.BaseModel, ABC):
     """An abstraction for operations that modify both butler database and
     datastore state.
     """
-
-    @classmethod
-    @abstractmethod
-    def from_header_data(
-        cls, header_data: Any, workspace_root: ResourcePath | None, datastore: Datastore
-    ) -> Self:
-        """Reconstruct this transaction from its header data and an optional
-        workspace root.
-
-        Parameters
-        ----------
-        header_data
-            JSON-compatible data previous obtained by calling `get_header_data`
-            on another instance.
-        workspace_root : `lsst.resources.ResourcePath` or `None`
-            Root directory for additional files the transaction can use to
-            store additional data beyond the header.  Files in this directory
-            may be read immediately or only when other methods are called. If
-            `None`, the butler implementation does not support workspaces and
-            transactions that require them are not supported.
-        datastore : `Datastore`
-            Datastore being written to.  Expected to be used only to
-            deserialize objects (e.g. transfer manifests or datastore records).
-
-        Returns
-        -------
-        transaction
-            Reconstructed transaction instance.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def get_header_data(self, datastore: Datastore) -> Any:
-        """Extract JSON-compatible data (e.g. `dict` of built-in types) that
-        can be used to reconstruct this transaction via `from_header_data`.
-
-        Parameters
-        ----------
-        datastore : `Datastore`
-            Datastore being written to.  Expected to be used only to serialize
-            objects (e.g. transfer manifests or datastore records).
-        """
-        raise NotImplementedError()
 
     @property
     def is_workspace(self) -> bool:
@@ -91,126 +51,152 @@ class ArtifactTransaction(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def get_runs(self) -> Set[CollectionName]:
-        """Return the `~CollectionType.RUN` collections whose dataset artifacts
-        may be modified by this transaction.
-        """
-        raise NotImplementedError()
-
-    def get_initial_batch(self) -> RawBatch:
-        """Return a batch of registry operations to perform when beginning the
-        transaction.
-        """
-        raise NotImplementedError()
-
-    def get_unstores(self) -> Set[DatasetId]:
-        """Return the IDs of datasets whose artifacts may be removed by this
-        transaction.
-
-        Since datastore record presence implies artifact existence, datastore
-        records need to be removed at the start of an artifact transaction and
-        re-inserted only if the transaction is *successfully* abandoned (which
-        may not always be possible, e.g. if artifacts have already been
-        irreversibly deleted).
-
-        TODO: Just returning a set of IDs here is not sufficient if we want
-        to be able to safely delete artifacts that hold multiple datasets
-        (e.g. DECam raws); only the datastore can know how to do the self-join
-        (e.g. on URI) that identifies those artifacts and tests whether all
-        datasets are being deleted or not.  We need to come up with a way to
-        abstract and probably serialize that information.
-        """
-        return frozenset()
-
-    @abstractmethod
-    def commit(
-        self, datastore: Datastore
-    ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        """Finish committing this transaction.
-
-        This method will be called on the server in `RemoteButler`, and will
-        only be called after `commit_phase_one` has been called.
-
-        Parameters
-        ----------
-        datastore : `Datastore`
-            Datastore client for this data repository.
-
-        Returns
-        -------
-        final_batch
-            Batch of database-only modifications to execute when the
-            transaction is closed in the database.
-        records
-            Datastore records to insert into the database.
+    def get_insert_only_runs(self) -> Set[CollectionName]:
+        """Return the `~CollectionType.RUN` collections that this transaction
+        inserts new datasets into only.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def revert(
-        self, datastore: Datastore
-    ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        """Finish reverting this transaction.
+    def get_modified_runs(self) -> Set[CollectionName]:
+        """Return the `~CollectionType.RUN` collections that this transaction
+        modifies in any way other than insertin new datasets.
 
-        This method will be called on the server in `RemoteButler`, and will
-        only be called after `commit_phase_one` has been called.
-
-        Parameters
-        ----------
-        datastore : `Datastore`
-            Datastore client for this data repository.
-
-        Returns
-        -------
-        final_batch
-            Batch of database-only modifications to execute when the
-            transaction is closed in the database.
-        records
-            Datastore records to insert into the database.
+        This includes datasets added to the database via
+        `ArtifactTransactionOpenContext.ensure_datasets`.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def abandon(
-        self, datastore: Datastore
-    ) -> tuple[RawBatch, dict[DatastoreTableName, list[StoredDatastoreItemInfo]]]:
-        """Finish abandoning this transaction.
+    def begin(self, context: ArtifactTransactionOpenContext) -> None:
+        """Open the transaction.
 
-        This method will be called on the server in `RemoteButler`, and will
-        only be called after `commit_phase_one` has been called.
+        This method is called within a database transaction with at least
+        ``READ COMMITTED`` isolation.  Exceptions raised by this method will
+        cause that database transaction to be rolled back, and exceptions that
+        originate in a database constraint failure must be re-raised or allowed
+        to propagate; these indicate that a rollback is already in progress.
 
-        Parameters
-        ----------
-        datastore : `Datastore`
-            Datastore client for this data repository.
+        After this method exits but before the database transaction is
+        committed, the database rows representing this transaction will be
+        inserted.
+        """
+        raise NotImplementedError()
 
-        Returns
-        -------
-        final_batch
-            Batch of database-only modifications to execute when the
-            transaction is closed in the database.
-        records
-            Datastore records to insert into the database.
+    @abstractmethod
+    def commit(self, context: ArtifactTransactionCommitContext) -> None:
+        """Commit this transaction.
+
+        This method is called within a database transaction with
+        ``SERIALIZABLE`` isolation.  Exceptions raised by this method will
+        cause that database transaction to be rolled back, and exceptions that
+        originate in a database constraint failure must be re-raised or allowed
+        to propagate; these indicate that a rollback is already in progress.
+
+        After this method exits but before the database transaction is
+        committed, the database rows representing this transaction will be
+        deleted.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def revert(self, context: ArtifactTransactionRevertContext) -> None:
+        """Revert this transaction.
+
+        This method is called within a database transaction with
+        ``READ COMMITTED`` isolation.  Exceptions raised by this method will
+        cause that database transaction to be rolled back, and exceptions that
+        originate in a database constraint failure must be re-raised or allowed
+        to propagate; these indicate that a rollback is already in progress.
+
+        After this method exits but before the database transaction is
+        committed, the database rows representing this transaction will be
+        deleted.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def abandon(self, context: ArtifactTransactionCloseContext) -> None:
+        """Abandon this transaction.
+
+        This method is called within a database transaction with at least
+        ``READ COMMITTED`` isolation.  Exceptions raised by this method will
+        cause that database transaction to be rolled back, and exceptions that
+        originate in a database constraint failure must be re-raised or allowed
+        to propagate; these indicate that a rollback is already in progress.
+
+        After this method exits but before the database transaction is
+        committed, the database rows representing this transaction will be
+        deleted.
+        """
+        raise NotImplementedError()
+
+
+class ArtifactTransactionOpenContext(ABC):
+    """The object passed to `ArtifactTransaction.begin` to allow it to perform
+    limited database operations.
+    """
+
+    @abstractmethod
+    def insert_new_run(self, name: CollectionName, doc: CollectionDocumentation | None = None) -> None:
+        """Insert the given `~CollectionType.RUN` collection and raise if it
+        already exists.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def insert_new_datasets(self, refs: Iterable[DatasetRef]) -> None:
+        """Insert new datasets, raising if any already exist."""
+        raise NotImplementedError()
+
+    def discard_datastore_records(self, dataset_ids: Iterable[DatasetId]) -> None:
+        """Discard any datastore records associated with the given datasets,
+        ignoring any datasets that do not exist or already do not have
+        datastore records.
+        """
+        raise NotImplementedError()
+
+
+class ArtifactTransactionCloseContext(ABC):
+    """The object passed to `ArtifactTransaction.abandon` to allow it to modify
+    the repository.
+    """
+
+    @property
+    @abstractmethod
+    def datastore(self) -> Datastore:
+        """The datastore to use for all artifact operations.
+
+        Typically only `Datastore.verify` and `Datastore.unstore` should need
+        to be called when a transaction is closed.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def insert_datastore_records(
+        self, records: Mapping[DatastoreTableName, Iterable[StoredDatastoreItemInfo]]
+    ) -> None:
+        """Insert records into a database table, marking a dataset as being
+        stored.
         """
         raise NotImplementedError()
 
     def verify_artifacts(
-        self, datastore: Datastore, refs: Mapping[DatasetId, DatasetRef]
+        self, refs: Mapping[DatasetId, DatasetRef]
     ) -> tuple[
         dict[DatastoreTableName, list[StoredDatastoreItemInfo]],
-        list[DatasetRef],
-        list[DatasetRef],
-        list[DatasetRef],
+        dict[DatasetId, DatasetRef],
+        dict[DatasetId, DatasetRef],
+        dict[DatasetId, DatasetRef],
     ]:
         """Verify dataset refs using a datastore and classify them.
 
         This is a convenience method typically called by at least two of
-        {`commit`, `revert`, `abandon`}.
+        {`ArtifactTransaction.commit`, `ArtifactTransaction.revert`,
+        `ArtifactTransaction.abandon`}.
 
         Parameters
         ----------
-        datastore : `Datastore`
-            Datastore to call `Datastore.verify` on.
         refs : `~collections.abc.Mapping` [ `~lsst.daf.butler.DatasetId`, \
                 `DatasetRef` ]
             Datasets to verify.
@@ -221,96 +207,123 @@ class ArtifactTransaction(ABC):
             Mapping from datastore table name to the records for that table,
             for all datasets in ``present``.
         present
-            List of datasets whose artifacts were verified successfully.
+            Datasets whose artifacts were verified successfully.
         missing
-            List of datasets whose artifacts were fully absent.
+            Datasets whose artifacts were fully absent.
         corrupted
-            List of datasets whose artifacts were incomplete or invalid.
+            Datasets whose artifacts were incomplete or invalid.
         """
         records: dict[DatastoreTableName, list[StoredDatastoreItemInfo]] = {
-            table_name: [] for table_name in datastore.tables.keys()
+            table_name: [] for table_name in self.datastore.tables.keys()
         }
-        present = []
-        missing = []
-        corrupted = []
-        for dataset_id, valid, records_for_dataset in datastore.verify(refs.values()):
+        present = {}
+        missing = {}
+        corrupted = {}
+        for dataset_id, valid, records_for_dataset in self.datastore.verify(refs.values()):
             ref = refs[dataset_id]
             if valid:
                 for table_name, records_for_table in records_for_dataset.items():
                     records[table_name].extend(records_for_table)
-                present.append(ref)
+                present[ref.id] = ref
             elif valid is None:
-                missing.append(ref)
+                missing[ref.id] = ref
             else:
-                corrupted.append(ref)
+                corrupted[ref.id] = ref
         return records, present, missing, corrupted
 
 
-@final
-class ArtifactTransactionHeader(pydantic.BaseModel):
-    """A pydantic model that allows a transaction to be saved as JSON.
-
-    This is called a "header" because some transactions (especially long-lived
-    ones) may store additional data in other files.
+class ArtifactTransactionRevertContext(ArtifactTransactionCloseContext):
+    """The object passed to `ArtifactTransaction.revert` to allow it to modify
+    the repository.
     """
 
-    name: ArtifactTransactionName
-    """Name registered in the database for the transaction."""
+    @abstractmethod
+    def discard_collection(self, name: CollectionName, *, force: bool = False) -> None:
+        """Delete any existing collection with the given name.
 
-    type_name: str
-    """Fully-qualified type name of the `ArtifactTransaction` subclass."""
+        If a collection with this name does not exist, do nothing.
 
-    data: Any
-    """JSON-compatible data returned by `ArtifactTransaction.get_header_data`
-    and passed to `ArtifactTransaction.from_header_data.
+        If ``force=False``, the collection must already have no associated
+        datasets, parent collections, or child collections.
+        If ``force=True``,
+
+        - all datasets in `~CollectionType.RUN` collections are discarded;
+        - all dataset-collection associations in `~CollectionType.TAGGED` or
+          `~CollectionType.CALIBRATION` collections are discarded (the datasets
+          themselves are not discarded);
+        - parent and child collection associations are discarded (the parent
+          and child collections themselves are not discarded).
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def discard_datasets(self, dataset_ids: Iterable[DatasetId]) -> None:
+        """Discard datasets.
+
+        Datasets that do not exist are ignored.
+
+        Datasets must not have any associated datastore records or associations
+        with `~CollectionType.TAGGED` or `~CollectionType.CALIBRATION`
+        collections.
+        """
+        raise NotImplementedError()
+
+
+class ArtifactTransactionCommitContext(ArtifactTransactionRevertContext):
+    """The object passed to `ArtifactTransaction.commit` to allow it to modify
+    the repository.
     """
 
-    def make_transaction(
-        self, workspace_root: ResourcePath | None, datastore: Datastore
-    ) -> ArtifactTransaction:
-        """Deserialize a `ArtifactTransaction` instance from this header.
+    @abstractmethod
+    def ensure_collection(
+        self, name: CollectionName, type: CollectionType, doc: CollectionDocumentation | None = None
+    ) -> None:
+        """Insert the given collection if it does not exist.
 
-        Parameters
-        ----------
-        workspace_root : `lsst.resources.ResourcePath` or `None`
-            Root directory for additional files the transaction can use to
-            store additional data beyond the header.  Files in this directory
-            may be read immediately or only when other methods are called. If
-            `None`, the butler implementation does not support workspaces and
-            transactions that require them are not supported.
-        datastore : `Datastore`
-            Datastore being written to.  Expected to be used to serialize
-            objects or interpret records only here.
-
-        Returns
-        -------
-        transaction : `ArtifactTransaction`
-            Deserialized transaction instance.
+        If the collection exists with a different type, raise
+        `CollectionTypeError`.  Documentation is only used when inserting the
+        new collection; documentation conflicts are not checked.
         """
-        transaction_type: type[ArtifactTransaction] = doImportType(self.type_name)
-        return transaction_type.from_header_data(self.data, None, datastore)
+        raise NotImplementedError()
 
-    @classmethod
-    def from_transaction(
-        cls, transaction: ArtifactTransaction, name: ArtifactTransactionName, datastore: Datastore
-    ) -> Self:
-        """Serialize a transaction to this model.
+    @abstractmethod
+    def set_collection_chain(
+        self, parent: CollectionName, children: Sequence[CollectionName], *, flatten: bool = False
+    ) -> None:
+        """Set the childen of a `~CollectionType.CHAINED` collection."""
+        raise NotImplementedError()
 
-        Parameters
-        ----------
-        transaction : `ArtifactTransaction`
-            Transaction object to serialize.
-        name : `str`
-            Name registered in the database for the transaction.
-        datastore : `Datastore`
-            Datastore being written to.  Expected to be used to deserialize
-            objects or interpret records only here.
+    @abstractmethod
+    def get_collection_chain(self, parent: CollectionName) -> list[CollectionName]:
+        """Get the childen of a `~CollectionType.CHAINED` collection."""
+        raise NotImplementedError()
 
-        Returns
-        -------
-        header : `ArtifactTransactionHeader`
-            Header for the serialized transaction.
+    @abstractmethod
+    def ensure_associations(
+        self,
+        collection: CollectionName,
+        dataset_ids: Iterable[DatasetId],
+        *,
+        replace: bool = False,
+        timespan: Timespan | None = None,
+    ) -> None:
+        """Associate datasets with a `~CollectionType.TAGGED` or
+        `~CollectionType.CALIBRATION` collection.
         """
-        return cls(
-            name=name, type_name=get_full_type_name(transaction), data=transaction.get_header_data(datastore)
-        )
+        raise NotImplementedError()
+
+    @abstractmethod
+    def discard_associations(
+        self,
+        collection: CollectionName,
+        dataset_ids: Iterable[DatasetId],
+        *,
+        replace: bool = False,
+        timespan: Timespan | None = None,
+    ) -> None:
+        """Discard associations between datasets and a `~CollectionType.TAGGED`
+        or `~CollectionType.CALIBRATION` collection.
+
+        Associations that do not exist are ignored.
+        """
+        raise NotImplementedError()

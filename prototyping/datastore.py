@@ -10,7 +10,7 @@ from typing import Any, TypeAlias, final
 from lsst.daf.butler import DatasetId, StoredDatastoreItemInfo, ddl
 from lsst.resources import ResourcePath
 
-from .aliases import DatastoreTableName, GetParameter, InMemoryDataset, StorageURI
+from .aliases import ColumnName, DatastoreTableName, GetParameter, InMemoryDataset, StorageURI
 from .primitives import DatasetRef
 
 
@@ -158,7 +158,23 @@ class DatastoreTableDefinition:
     """Definition of a database table used to store datastore records."""
 
     spec: ddl.TableSpec
+    """Specification used to create the table.
+
+    Must include a UUID ``dataset_id`` column.
+    """
+
     record_type: type[StoredDatastoreItemInfo]
+    """Python type used to represent records of the table.
+
+    Must include the UUID; this is a major difference from the current
+    `StoredDatastoreItemInfo` (since DM-40053) that needs to be resolved.
+    """
+
+    artifact_key: ColumnName | None
+    """A column name that should be used to identify connect the rows for
+    datasets that share the same artifact, to prevent those artifacts from
+    being deleted unless all such datasets are being unstored.
+    """
 
 
 ArtifactTransferResponse: TypeAlias = Any
