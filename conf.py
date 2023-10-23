@@ -18,4 +18,5 @@ intersphinx_mapping = {
     "lsst.daf.butler.registries.remote": ("https://pipelines.lsst.io/v/weekly", None),
     "lsst.pipe.base": ("https://pipelines.lsst.io/v/weekly", None),
     "lsst.ctrl.mpexec": ("https://pipelines.lsst.io/v/weekly", None),
+    "pydantic": ("https://docs.pydantic.dev/latest", None),
 }

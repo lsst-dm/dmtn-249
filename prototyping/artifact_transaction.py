@@ -287,6 +287,11 @@ class ArtifactTransactionCommitContext(ArtifactTransactionRevertContext):
         raise NotImplementedError()
 
     @abstractmethod
+    def insert_new_datasets(self, refs: Iterable[DatasetRef]) -> None:
+        """Insert new datasets, raising if any already exist."""
+        raise NotImplementedError()
+
+    @abstractmethod
     def set_collection_chain(
         self, parent: CollectionName, children: Sequence[CollectionName], *, flatten: bool = False
     ) -> None:
