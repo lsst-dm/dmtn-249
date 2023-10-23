@@ -411,7 +411,7 @@ Removals due to low-level failures can be retried by calling :py:meth:`Butler.co
 The :py:meth:`~ArtifactTransaction.abandon` implementation for removals is almost identical to the one for ``put``: :py:meth:`Datastore.verify` is used to identify which datasets still exist and which have been removed, and the datastore records for those still present are returned so they can be inserted into the database when the transaction is closed.
 When abandoning a removal we leave datasets as registered but unstored when their artifacts are missing, since this is closer to the state or the repository when the transaction was opened and avoids any chance of failure due to :py:attr:`~lsst.daf.butler.CollectionType.TAGGED` or :py:attr:`~lsst.daf.butler.CollectionType.CALIBRATION` associations.
 
-A subtler difference between ``put`` and removal is that the :py:class:`~lsst.daf.butler.DatasetRef` objects held by :py:class:`RemovalTransaction` include their original datastore records, allowing :py:meth:`Datastore.verify` (in both py:meth:`~ArtifactTransaction.abandon` and py:meth:`~ArtifactTransaction.revert`) to guard against unexpected changes (e.g. by comparing checksums), while in :py:class:`PutTransaction` all :py:meth:`Datastore.verify` can do is generate new records.
+A subtler difference between ``put`` and removal is that the :py:class:`~lsst.daf.butler.DatasetRef` objects held by :py:class:`RemovalTransaction` include their original datastore records, allowing :py:meth:`Datastore.verify` (in both :py:meth:`~ArtifactTransaction.abandon` and :py:meth:`~ArtifactTransaction.revert`) to guard against unexpected changes (e.g. by comparing checksums), while in :py:class:`PutTransaction` all :py:meth:`Datastore.verify` can do is generate new records.
 
 .. _use-case-transfers:
 
@@ -434,11 +434,29 @@ Prototype Code
 
 .. py:class:: Butler
 
+   .. py:method:: get_many
+
+      .. literalinclude:: prototyping/butler.py
+         :language: py
+         :pyobject: Butler.get_many
+
    .. py:method:: put_many
 
       .. literalinclude:: prototyping/butler.py
          :language: py
          :pyobject: Butler.put_many
+
+   .. py:method:: expand_existing_dataset_refs
+
+      .. literalinclude:: prototyping/butler.py
+         :language: py
+         :pyobject: Butler.expand_existing_dataset_refs
+
+   .. py:method:: expand_data_coordinates
+
+      .. literalinclude:: prototyping/butler.py
+         :language: py
+         :pyobject: Butler.expand_data_coordinates
 
    .. py:method:: remove_datasets
 
